@@ -844,20 +844,230 @@ class ChatInput(TextArea):
         self._suggestion_matches = []
         self.update_suggestions_ui()
 
-WELCOME_ART = """
-[#f2a813]███████╗███████╗██████╗ ███████╗██████╗  █████╗ ████████╗███████╗[/]
-[#f2a813]██╔════╝██╔════╝██╔══██╗██╔════╝██╔══██╗██╔══██╗╚══██╔══╝██╔════╝[/]
-[#f2a813]█████╗  █████╗  ██║  ██║█████╗  ██████╔╝███████║   ██║   █████╗  [/]
-[#f2a813]██╔══╝  ██╔══╝  ██║  ██║██╔══╝  ██╔══██╗██╔══██║   ██║   ██╔══╝  [/]
-[#f2a813]██║     ███████╗██████╔╝███████╗██║  ██║██║  ██║   ██║   ███████╗[/]
-[#f2a813]╚═╝     ╚══════╝╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝[/]
+def get_welcome_banner(agent_view) -> str:
+    from datetime import datetime, timedelta
+    import glob
+    import os
+    import json
+    try:
+        from tiktoken import get_encoding
+        HAS_TIKTOKEN = True
+    except ImportError:
+        HAS_TIKTOKEN = False
 
-Tips for getting started:
+    def estimate_tokens(text: str) -> int:
+        if HAS_TIKTOKEN:
+            try:
+                enc = get_encoding("cl100k_base")
+                return len(enc.encode(text))
+            except Exception:
+                pass
+        return len(text) // 4
+
+    # 1. Determine last calendar month
+    now = datetime.now()
+    first_day_current_month = now.replace(day=1)
+    last_day_last_month = first_day_current_month - timedelta(days=1)
+    target_year = last_day_last_month.year
+    target_month = last_day_last_month.month
+    
+    # 2. Scan sessions directory
+    sessions_dir = get_storage_path("sessions")
+    if not os.path.exists(sessions_dir):
+        os.makedirs(sessions_dir, exist_ok=True)
+        
+    session_files = glob.glob(os.path.join(sessions_dir, "*.json"))
+    
+    agent_tokens = {}
+    agent_collabs = {}
+    total_conversations_all_time = set()
+    total_conversations_target_month = set()
+    tools_called_target_month = 0
+    
+    valid_agents = set(agent_view.agent_manager.agents.keys())
+    
+    for filepath in session_files:
+        base = os.path.basename(filepath).replace(".json", "")
+        parts = base.split("_")
+        if len(parts) < 3:
+            continue
+            
+        session_id = f"{parts[0]}_{parts[1]}"
+        total_conversations_all_time.add(session_id)
+        
+        agent_name = "_".join(parts[2:])
+        matched_agent = None
+        for a in valid_agents:
+            if a.replace(" ", "_") == agent_name or a.lower() == agent_name.lower():
+                matched_agent = a
+                break
+        if not matched_agent:
+            matched_agent = agent_name.replace("_", " ").title()
+            
+        try:
+            ts = int(parts[1])
+            file_dt = datetime.fromtimestamp(ts)
+        except (ValueError, IndexError):
+            try:
+                mtime = os.path.getmtime(filepath)
+                file_dt = datetime.fromtimestamp(mtime)
+            except Exception:
+                continue
+                
+        is_target_month = (file_dt.year == target_year and file_dt.month == target_month)
+        
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                history = json.load(f)
+        except Exception:
+            continue
+            
+        for msg in history:
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            content = msg.get("content") or ""
+            
+            # Count tools called in target month
+            if is_target_month:
+                t_calls = msg.get("tool_calls") or []
+                t_outs = msg.get("tool_outputs") or []
+                tools_called_target_month += max(len(t_calls), len(t_outs))
+                
+            # If target month, accumulate tokens for the agent
+            if is_target_month:
+                total_conversations_target_month.add(session_id)
+                msg_tokens = estimate_tokens(content)
+                agent_tokens[matched_agent] = agent_tokens.get(matched_agent, 0) + msg_tokens
+                
+                # Check for agent collaborations (summoned using @) in messages sent by this agent
+                if role == "ai" and content:
+                    mentions = agent_view.agent_manager.get_mentions(content)
+                    if mentions:
+                        if matched_agent not in agent_collabs:
+                            agent_collabs[matched_agent] = set()
+                        for m in mentions:
+                            if m != matched_agent:
+                                agent_collabs[matched_agent].add(m)
+
+    # Fallback logic if last calendar month had no activity
+    used_month_name = last_day_last_month.strftime("%B")
+    if not agent_tokens:
+        target_year = now.year
+        target_month = now.month
+        used_month_name = now.strftime("%B")
+        
+        for filepath in session_files:
+            base = os.path.basename(filepath).replace(".json", "")
+            parts = base.split("_")
+            if len(parts) < 3:
+                continue
+            session_id = f"{parts[0]}_{parts[1]}"
+            agent_name = "_".join(parts[2:])
+            matched_agent = None
+            for a in valid_agents:
+                if a.replace(" ", "_") == agent_name or a.lower() == agent_name.lower():
+                    matched_agent = a
+                    break
+            if not matched_agent:
+                matched_agent = agent_name.replace("_", " ").title()
+                
+            try:
+                ts = int(parts[1])
+                file_dt = datetime.fromtimestamp(ts)
+            except (ValueError, IndexError):
+                try:
+                    mtime = os.path.getmtime(filepath)
+                    file_dt = datetime.fromtimestamp(mtime)
+                except Exception:
+                    continue
+                    
+            is_target_month = (file_dt.year == target_year and file_dt.month == target_month)
+            if not is_target_month:
+                continue
+                
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+            except Exception:
+                continue
+                
+            for msg in history:
+                if not isinstance(msg, dict):
+                    continue
+                role = msg.get("role")
+                content = msg.get("content", "")
+                
+                t_calls = msg.get("tool_calls") or []
+                t_outs = msg.get("tool_outputs") or []
+                tools_called_target_month += max(len(t_calls), len(t_outs))
+                
+                tokens = estimate_tokens(content) + sum(estimate_tokens(str(o.get("content", ""))) for o in (msg.get("tool_outputs") or []) if isinstance(o, dict))
+                agent_tokens[matched_agent] = agent_tokens.get(matched_agent, 0) + tokens
+                
+                if role == "ai" and content:
+                    mentions = agent_view.agent_manager.get_mentions(content)
+                    if mentions:
+                        if matched_agent not in agent_collabs:
+                            agent_collabs[matched_agent] = set()
+                        for m in mentions:
+                            if m != matched_agent:
+                                agent_collabs[matched_agent].add(m)
+
+    if agent_tokens:
+        best_agent = max(agent_tokens, key=agent_tokens.get)
+        tokens_processed = agent_tokens[best_agent]
+        collabs = list(agent_collabs.get(best_agent, []))
+        collaborations = ", ".join(collabs) if collabs else "None"
+    else:
+        best_agent = agent_view.active_agent.name if getattr(agent_view, "active_agent", None) else "Rita"
+        tokens_processed = 0
+        collaborations = "None"
+        
+    total_convs = len(total_conversations_all_time)
+    tools_called = tools_called_target_month
+
+    width = 62
+    content_width = width - 4 # 58
+
+    def make_row(text: str, align: str = "left") -> str:
+        space_len = content_width - len(text)
+        if space_len < 0:
+            text = text[:content_width - 3] + "..."
+            space_len = 0
+        if align == "center":
+            left_space = space_len // 2
+            right_space = space_len - left_space
+            return f"│ {' ' * left_space}{text}{' ' * right_space} │"
+        else:
+            return f"│ {text}{' ' * space_len} │"
+
+    lines = [
+        "╭" + "─" * (width - 2) + "╮",
+        make_row("Federate.AI", align="center"),
+        make_row("", align="center"),
+        make_row(f"  Agent of the Month: {best_agent} ({used_month_name})"),
+        make_row(f"  Tokens Processed: {tokens_processed:,}"),
+        make_row(f"  Total Conversations: {total_convs:,}"),
+        make_row(f"  Tools Called: {tools_called:,}"),
+        make_row(f"  Collaborated with: {collaborations}"),
+        "╰" + "─" * (width - 2) + "╯"
+    ]
+
+    
+    colors = ["#f2a813", "#ec9624", "#e68435", "#e07246", "#da6057", "#d44e68", "#ce3c79", "#c82a8a", "#c2189b"]
+    colored_lines = []
+    for line, color in zip(lines, colors):
+        colored_lines.append(f"[{color}]{line}[/]")
+        
+    tips = """
+[#f2a813]Tips for getting started:[/]
 1. Ask questions, edit files, or run commands.
 2. Use & to inject files. Use @ to invoke particular agents.
 3. Press F2 to configure the active agent.
 4. Press Ctrl+K to start a fresh conversation.
 """
+    return "\n".join(colored_lines) + "\n" + tips
 
 def render_latex_to_unicode(text: str) -> str:
     """Parses LaTeX math blocks into Unicode for terminal rendering."""
@@ -1051,7 +1261,7 @@ class AIAgentView(Vertical):
         self.turn_queue = []
         self.turn_lock = threading.Lock()
 
-        self._write_log(WELCOME_ART)
+        self._write_log(get_welcome_banner(self))
         self.update_tokens()
         if "-r" in sys.argv:
             # We delay the call until the UI is fully painted and stable
@@ -1107,7 +1317,7 @@ class AIAgentView(Vertical):
         self.session_manager.clear_all_contexts()
         self.clear_chat_ui()
         self._write_log(Rule(title="[bold yellow]ALL CONTEXTS CLEARED", style="dim"))
-        self._write_log(WELCOME_ART)
+        self._write_log(get_welcome_banner(self))
         self.update_tokens()
     
     def action_resume_last(self):
