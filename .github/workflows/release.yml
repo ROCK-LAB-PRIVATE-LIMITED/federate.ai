@@ -1,0 +1,193 @@
+name: Build and Publish Wheels
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build_wheels:
+    name: Build Wheel for ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows Native (x86_64)
+          - target: windows-amd64
+            os: windows-latest
+            goos: windows
+            goarch: amd64
+            plat_name: win_amd64
+            suffix: .exe
+            
+          # macOS Intel Native
+          - target: macos-x86_64
+            os: macos-15-intel
+            goos: darwin
+            goarch: amd64
+            plat_name: macosx_10_9_x86_64
+            suffix: ""
+            
+          # macOS Apple Silicon Native
+          - target: macos-arm64
+            os: macos-14
+            goos: darwin
+            goarch: arm64
+            plat_name: macosx_11_0_arm64
+            suffix: ""
+            
+          # Linux Native (x86_64)
+          - target: linux-amd64
+            os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            plat_name: manylinux2014_x86_64
+            suffix: ""
+
+          # Raspberry Pi 64-bit (Modern Pi 3/4/5)
+          - target: linux-arm64
+            os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            plat_name: manylinux2014_aarch64
+            cc: aarch64-linux-gnu-gcc
+            cc_pkg: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            suffix: ""
+            
+          # Android/Termux (ARM64) via NDK Cross-Compilation
+          - target: android-arm64
+            os: ubuntu-latest
+            goos: android
+            goarch: arm64
+            # Termux python expects the standard linux_aarch64 wheel tag
+            plat_name: android_24_arm64_v8a 
+            suffix: ""
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Build Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build wheel setuptools
+
+      # --- Setup Android NDK (Only for Android Target) ---
+      - name: Setup Android NDK
+        if: matrix.goos == 'android'
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26d
+          add-to-path: false
+
+      - name: Install Linux Cross-Compilers
+        if: matrix.cc_pkg != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.cc_pkg }}
+
+      # --- Build Desktop / Standard Linux Binaries ---
+      - name: Compile Go Sidecars (Desktop)
+        if: matrix.goos != 'android'
+        env:
+          CGO_ENABLED: 1
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          if [ -n "${{ matrix.cc }}" ]; then
+            export CC=${{ matrix.cc }}
+          fi
+          mkdir -p src/meerkat/bin
+          cd go
+          go build -ldflags="-s -w" -o ../src/meerkat/bin/meerkat_bridge${{ matrix.suffix }} ./cmd/bridge/main.go
+          go build -ldflags="-s -w" -o ../src/meerkat/bin/meerkat_embed${{ matrix.suffix }} ./cmd/embed/main.go
+          go build -ldflags="-s -w" -o ../src/meerkat/bin/meerkat_search${{ matrix.suffix }} ./cmd/search/main.go
+
+      # --- Build Android Termux Binaries via NDK ---
+      - name: Compile Go Sidecars (Android)
+        if: matrix.goos == 'android'
+        env:
+          CGO_ENABLED: 1
+          GOOS: android
+          GOARCH: arm64
+          # Point CGO directly to the NDK clang compiler for API Level 24 (Standard Termux Base)
+          CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CXX: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
+        run: |
+          mkdir -p src/meerkat/bin
+          cd go
+          go build -ldflags="-s -w" -o ../src/meerkat/bin/meerkat_bridge ./cmd/bridge/main.go
+          go build -ldflags="-s -w" -o ../src/meerkat/bin/meerkat_embed ./cmd/embed/main.go
+          go build -ldflags="-s -w" -o ../src/meerkat/bin/meerkat_search ./cmd/search/main.go
+
+      - name: Build Platform Wheel
+        run: |
+          python -m build --wheel --config-setting=--build-option=--plat-name=${{ matrix.plat_name }}
+
+      - name: Upload Wheel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+
+  build_sdist:
+    name: Build Source Distribution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Build Dependencies
+        run: pip install build
+      - name: Build sdist
+        run: python -m build --sdist
+      - name: Upload sdist Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    name: Publish Release to PyPI
+    environment: pypi
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - name: Download all Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
