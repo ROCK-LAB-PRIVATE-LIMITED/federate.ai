@@ -40,7 +40,7 @@ def load_audio_config():
     default_config = {
         "tts_voice": "af_sarah",
         "tts_speed": 1.1,
-        "stt_start_words": "JARVIS, AGENT, CORTANA, COMPUTER",
+        "stt_start_words": "AGENT, ASSISTANT, COMPUTER",
         "stt_stop_words": "STOP LISTENING, END DICTATION",
         "stt_send_words": "EXECUTE, FINISH, SEND IT",
         "stt_delete_words": "DELETE LAST, REMOVE LAST, SCRAP THAT",

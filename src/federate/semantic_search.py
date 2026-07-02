@@ -12,7 +12,7 @@ class SemanticSearchEngine:
         self.db_path = db_path
         if binary_path is None:
             # Look in the packaged bin/ folder relative to this file
-            rel_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "meerkat_embed" + (".exe" if platform.system() == "Windows" else ""))
+            rel_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "federate_embed" + (".exe" if platform.system() == "Windows" else ""))
         else:
             rel_path = binary_path
             

@@ -468,18 +468,18 @@ class ConfigModal(ModalScreen[str]):
         try:
             # 1. Update Primary Credential
             if primary_key:
-                keyring.set_password("MeerKat", primary_user, primary_key)
+                keyring.set_password("Federate", primary_user, primary_key)
                 os.environ[f"AGENT_KEY_{agent_name.upper().replace(' ', '_')}"] = primary_key
             else:
-                try: keyring.delete_password("MeerKat", primary_user)
+                try: keyring.delete_password("Federate", primary_user)
                 except Exception: pass
 
             # 2. Update Backup Credential
             if backup_key:
-                keyring.set_password("MeerKat", backup_user, backup_key)
+                keyring.set_password("Federate", backup_user, backup_key)
                 os.environ[f"AGENT_BACKUP_KEY_{agent_name.upper().replace(' ', '_')}"] = backup_key
             else:
-                try: keyring.delete_password("MeerKat", backup_user)
+                try: keyring.delete_password("Federate", backup_user)
                 except Exception: pass
 
         except Exception as e:
@@ -845,18 +845,18 @@ class ChatInput(TextArea):
         self.update_suggestions_ui()
 
 WELCOME_ART = """
-[#f2a813]███╗   ███╗███████╗███████╗██████╗ ██╗  ██╗ █████╗ ████████╗[/]
-[#f2a813]████╗ ████║██╔════╝██╔════╝██╔══██╗██║ ██╔╝██╔══██╗╚══██╔══╝[/]
-[#f2a813]██╔████╔██║█████╗  █████╗  ██████╔╝█████╔╝ ███████║   ██║   [/]
-[#f2a813]██║╚██╔╝██║██╔══╝  ██╔══╝  ██╔══██╗██╔═██╗ ██╔══██║   ██║   [/]
-[#f2a813]██║ ╚═╝ ██║███████╗███████╗██║  ██║██║  ██╗██║  ██║   ██║   [/]
-[#f2a813]╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   [/]
+[#f2a813]███████╗███████╗██████╗ ███████╗██████╗  █████╗ ████████╗███████╗[/]
+[#f2a813]██╔════╝██╔════╝██╔══██╗██╔════╝██╔══██╗██╔══██╗╚══██╔══╝██╔════╝[/]
+[#f2a813]█████╗  █████╗  ██║  ██║█████╗  ██████╔╝███████║   ██║   █████╗  [/]
+[#f2a813]██╔══╝  ██╔══╝  ██║  ██║██╔══╝  ██╔══██╗██╔══██║   ██║   ██╔══╝  [/]
+[#f2a813]██║     ███████╗██████╔╝███████╗██║  ██║██║  ██║   ██║   ███████╗[/]
+[#f2a813]╚═╝     ╚══════╝╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝[/]
 
 Tips for getting started:
 1. Ask questions, edit files, or run commands.
-2. Use & to inject files. Use @ to mention agents.
+2. Use & to inject files. Use @ to invoke particular agents.
 3. Press F2 to configure the active agent.
-4. Press Ctrl+K to clear all agent contexts.
+4. Press Ctrl+K to start a fresh conversation.
 """
 
 def render_latex_to_unicode(text: str) -> str:
@@ -887,6 +887,7 @@ class AIAgentView(Vertical):
     
     BINDINGS =[
         Binding("f2", "open_chat_manager", "Sessions"),
+        Binding("ctrl+k", "clear_all_contexts", "New Chat"),
         Binding("f4", "open_active_config", "Edit Agent"),
         Binding("f5", "switch_agent", "Switch Agent"),
         Binding("ctrl+t", "cycle_arm_mode", "Cycle Mode"),

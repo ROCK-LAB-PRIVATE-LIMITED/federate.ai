@@ -59,7 +59,7 @@ func PerformSearch(query string, limit int) (res []SearchResult, err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: meerkat_search <query>[limit]")
+		fmt.Fprintln(os.Stderr, "Usage: federate_search <query>[limit]")
 		os.Exit(1)
 	}
 

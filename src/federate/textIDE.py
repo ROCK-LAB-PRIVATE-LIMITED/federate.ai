@@ -135,11 +135,11 @@ def get_safe_starting_dir() -> str:
     """Returns a highly permissive, user-specific safe directory and creates it if missing."""
     if platform.system() == "Windows":
         # Safe, highly permissive path in the user profile (no admin rights needed)
-        path = Path.home() / "MeerkatWorkspace"
+        path = Path.home() / "FederateWorkspace"
     elif platform.system() == "Darwin": # macOS
-        path = Path.home() / "Documents" / "MeerkatWorkspace"
+        path = Path.home() / "Documents" / "FederateWorkspace"
     else: # Linux / Others
-        path = Path.home() / "trilobytes_workspace"
+        path = Path.home() / "FederateWorkspace"
     
     # Automatically create the folder (and any parent folders) if it doesn't exist yet
     path.mkdir(parents=True, exist_ok=True)
@@ -375,7 +375,7 @@ class FilenameModal(ModalScreen[str]):
     def cancel(self):
         self.dismiss(None)
 
-class MEERKAT_IDE(App):
+class FEDERATE_IDE(App):
     CSS = """
     #main_switcher { height: 1fr; width: 100%; }
     #code_view { height: 100%; width: 100%; }
@@ -852,7 +852,7 @@ class MEERKAT_IDE(App):
                 return
 
             import tempfile, subprocess, json, os
-            bin_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "meerkat_bridge" + (".exe" if os.name == "nt" else ""))
+            bin_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "federate_bridge" + (".exe" if os.name == "nt" else ""))
             ext = next((k for k, v in EXT_MAP.items() if v == lang_name), ".txt")
             with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as f: f.write(code.encode('utf-8'))
             raw_nodes = json.loads(subprocess.check_output([bin_path, "parse", f.name], stderr=subprocess.DEVNULL).decode('utf-8'))
@@ -920,5 +920,5 @@ class MEERKAT_IDE(App):
 
 if __name__ == "__main__":
     initial_file = sys.argv[1] if len(sys.argv) > 1 else None
-    app = MEERKAT_IDE(initial_file=initial_file)
+    app = FEDERATE_IDE(initial_file=initial_file)
     app.run()

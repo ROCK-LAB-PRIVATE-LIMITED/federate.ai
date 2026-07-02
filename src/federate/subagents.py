@@ -58,7 +58,7 @@ def dispatch_subagent(task_description: str) -> str:
     
     # Place worktrees inside a hidden folder in the base dir 
     # (This ensures the tools in toolbox.py still pass their security path constraints)
-    wt_root = os.path.join(base_dir, ".meerkat_worktrees")
+    wt_root = os.path.join(base_dir, ".federate_worktrees")
     os.makedirs(wt_root, exist_ok=True)
     
     # Exclude worktrees from the main git tracking natively
@@ -66,8 +66,8 @@ def dispatch_subagent(task_description: str) -> str:
     if os.path.exists(exclude_path):
         with open(exclude_path, "r+") as f:
             content = f.read()
-            if ".meerkat_worktrees" not in content:
-                f.write("\n.meerkat_worktrees/\n")
+            if ".federate_worktrees" not in content:
+                f.write("\n.federate_worktrees/\n")
 
     folder_name = branch_name.replace("/", "_")
     worktree_path = os.path.abspath(os.path.join(wt_root, folder_name))

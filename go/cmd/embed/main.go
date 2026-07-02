@@ -19,7 +19,7 @@ type EmbeddingResult struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: meerkat_embed <text_to_embed>")
+		fmt.Fprintln(os.Stderr, "Usage: federate_embed <text_to_embed>")
 		os.Exit(1)
 	}
 

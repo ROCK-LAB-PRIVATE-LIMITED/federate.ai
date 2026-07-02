@@ -373,7 +373,7 @@ func dump(filePath string) error {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: meerkat_bridge <command> <args...>")
+		fmt.Println("Usage: federate_bridge <command> <args...>")
 		fmt.Println("Commands: highlight, parse, dump")
 		os.Exit(1)
 	}
@@ -382,7 +382,7 @@ func main() {
 	switch command {
 	case "dump":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: meerkat_bridge dump <file_path>")
+			fmt.Println("Usage: federate_bridge dump <file_path>")
 			os.Exit(1)
 		}
 		err := dump(os.Args[2])
@@ -392,7 +392,7 @@ func main() {
 		}
 	case "highlight":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: meerkat_bridge highlight <file_path> [style] [lexer]")
+			fmt.Println("Usage: federate_bridge highlight <file_path> [style] [lexer]")
 			os.Exit(1)
 		}
 		style := "monokai"
@@ -410,7 +410,7 @@ func main() {
 		}
 	case "parse":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: meerkat_bridge parse <file_path>")
+			fmt.Println("Usage: federate_bridge parse <file_path>")
 			os.Exit(1)
 		}
 		err := parse(os.Args[2])

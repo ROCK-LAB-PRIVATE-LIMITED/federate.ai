@@ -237,13 +237,13 @@ def process_slash_command(command: str, agent_view):
         except:
             base_dir = os.getcwd()
             
-        init_file = os.path.join(base_dir, "TriloByte.md")
+        init_file = os.path.join(base_dir, "Federate.md")
         try:
             with open(init_file, "w") as f:
-                f.write("# TriloByte CLI Context\n\nProvide your project specific instructions here.")
+                f.write("# Federate CLI Context\n\nProvide your project specific instructions here.")
             agent_view.log_to_ui(f"Successfully initialized `{init_file}`", is_markdown=True)
         except Exception as e:
-            agent_view.log_to_ui(f"Failed to create TriloByte.md: {e}")
+            agent_view.log_to_ui(f"Failed to create Federate.md: {e}")
             
     elif cmd == "/compress":
         agent_view.log_to_ui("Analyzing chat history for technical compression...", is_markdown=False)
@@ -557,7 +557,7 @@ def handle_ampersand_commands(prompt: str, agent_view) -> str:
 
 
 def save_pdf_dpi(dpi: int):
-    """Persists PDF DPI configuration to .meerkat folder."""
+    """Persists PDF DPI configuration to .federate folder."""
     from toolbox import get_storage_path
     path = get_storage_path("pdf_config.json")
     try:
@@ -567,7 +567,7 @@ def save_pdf_dpi(dpi: int):
         pass
 
 def load_pdf_dpi() -> int:
-    """Loads persisted PDF DPI configuration from .meerkat folder."""
+    """Loads persisted PDF DPI configuration from .federate folder."""
     from toolbox import get_storage_path
     path = get_storage_path("pdf_config.json")
     if os.path.exists(path):

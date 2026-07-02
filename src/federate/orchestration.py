@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from semantic_search import SemanticSearchEngine
 
 from pathlib import Path
-from toolbox import get_storage_path
+from toolbox import get_storage_path, FEDERATE_DIR
 
 # Load environment variables from .env file
 load_dotenv()
@@ -74,7 +74,7 @@ class AgentConfig:
             if not is_keyring_locked():
                 import keyring
                 user_key = f"agent_key_{self.name.lower().replace(' ', '_')}"
-                val = keyring.get_password("MeerKat", user_key)
+                val = keyring.get_password("Federate", user_key)
                 if val: return val
         except Exception:
             pass
@@ -88,7 +88,7 @@ class AgentConfig:
             if not is_keyring_locked():
                 import keyring
                 user_key = f"agent_backup_key_{self.name.lower().replace(' ', '_')}"
-                val = keyring.get_password("MeerKat", user_key)
+                val = keyring.get_password("Federate", user_key)
                 if val: return val
         except Exception:
             pass
@@ -259,7 +259,10 @@ class SessionManager:
         self.current_session_id = f"sess_{int(time.time())}"
         self.aborted_batch_ids = set()
         self._lock = threading.Lock()
-        self.semantic_engine = SemanticSearchEngine()
+        
+        # Explicitly write the episodic memory DB to the global state folder
+        db_path = os.path.join(FEDERATE_DIR, "episodic_memory.db")
+        self.semantic_engine = SemanticSearchEngine(db_path=db_path)
         
         # Start background sync
         threading.Thread(target=self.sync_all_sessions, daemon=True).start()

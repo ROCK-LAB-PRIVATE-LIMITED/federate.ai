@@ -57,12 +57,12 @@ from pathlib import Path
 
 # --- GLOBAL SYSTEM STORAGE REDIRECTION ---
 # Redirects all internal state/memories outside the code folder to your safe Home Directory.
-MEERKAT_DIR = os.path.join(str(Path.home()), ".meerkat")
+FEDERATE_DIR = os.path.join(str(Path.home()), ".federate")
 
 def get_storage_path(*args):
-    """Explicitly builds a path inside MEERKAT_DIR for 'agents' or 'sessions'."""
+    """Explicitly builds a path inside FEDERATE_DIR for 'agents' or 'sessions'."""
     if args and args[0] in ["agents", "sessions"]:
-        return os.path.join(MEERKAT_DIR, *args)
+        return os.path.join(FEDERATE_DIR, *args)
     return os.path.join(*args)
 
 def get_locked_keyring():
@@ -153,7 +153,7 @@ def check_abort():
             if "interrupted" in str(e).lower() or "aborted" in str(e).lower():
                 raise e
 
-DB_PATH = get_storage_path(str(Path.home()), ".meerkat", ".meerkat_state.db")
+DB_PATH = get_storage_path(str(Path.home()), ".federate", ".federate_state.db")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 shared_db_conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=60.0)
 shared_db_conn.execute("PRAGMA journal_mode=WAL;")  # Allows simultaneous reading & writing
@@ -666,7 +666,7 @@ def search_web(query: str) -> str:
         #ddgs = DDGS()
         
         import subprocess, json, os
-        bin_path = get_storage_path(os.path.dirname(os.path.abspath(__file__)), "bin", "meerkat_search" + (".exe" if os.name == "nt" else ""))
+        bin_path = get_storage_path(os.path.dirname(os.path.abspath(__file__)), "bin", "federate_search" + (".exe" if os.name == "nt" else ""))
         
         # Use Popen to allow interruption mid-search
         proc = subprocess.Popen(
@@ -912,7 +912,7 @@ def node_execute_search(state: AgentState):
     try:
         check_abort()
         import subprocess, json, os
-        bin_path = get_storage_path(os.path.dirname(os.path.abspath(__file__)), "bin", "meerkat_search" + (".exe" if os.name == "nt" else ""))
+        bin_path = get_storage_path(os.path.dirname(os.path.abspath(__file__)), "bin", "federate_search" + (".exe" if os.name == "nt" else ""))
         
         # Use Popen to allow interruption mid-search
         proc = subprocess.Popen(

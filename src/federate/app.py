@@ -35,11 +35,11 @@ def get_safe_starting_dir() -> str:
     """Returns a highly permissive, user-specific safe directory and creates it if missing."""
     if platform.system() == "Windows":
         # Safe, highly permissive path in the user profile (no admin rights needed)
-        path = Path.home() / "MeerkatWorkspace"
+        path = Path.home() / "FederateWorkspace"
     elif platform.system() == "Darwin": # macOS
-        path = Path.home() / "Documents" / "MeerkatWorkspace"
+        path = Path.home() / "Documents" / "FederateWorkspace"
     else: # Linux / Others
-        path = Path.home() / "MeerkatWorkspace"
+        path = Path.home() / "FederateWorkspace"
     
     # Automatically create the folder (and any parent folders) if it doesn't exist yet
     path.mkdir(parents=True, exist_ok=True)
@@ -157,7 +157,7 @@ class DirectoryModal(ModalScreen[str]):
 
 import toolbox
 
-class MeerKat(App):
+class Federate(App):
     """The main harness wrapper for agent.py"""
     
     CSS = """
@@ -256,7 +256,7 @@ class MeerKat(App):
         self.push_screen(DirectoryModal(current_path), handle_dir_selection)
 
 def main():
-    app = MeerKat()
+    app = Federate()
     app.run()
 
 if __name__ == "__main__":
