@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime artifacts
+*.db
+*.bin
+
+# Nuitka build artifacts
+meerkat.build/
+
+# Pre-built Go binaries (CI builds these)
+meerkat_bridge
+meerkat_bridge.exe
+meerkat_embed
+meerkat_embed.exe
+meerkat_search
+meerkat_search.exe
+
+# Go binaries in package (CI places these)
+src/meerkat/bin/meerkat_*
+
+# Downloaded models (runtime)
+models/
+
+# Environment
+.env
+
+# PDFs / data junk
+*.pdf
