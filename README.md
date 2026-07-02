@@ -90,3 +90,7 @@ To protect your workspace, the system boots in **SAFE (PLAN)** mode. In this mod
   * **`Ctrl+K`**: Wipe the memory of all agents
   * **`Ctrl+A`**: **ABORT** (Emergency stop for any running AI tasks or terminal commands)
   * **`Ctrl+Q`**: Quit Federate.AI
+
+### Statutory Warning
+* Federate.AI contains full unrestricted code/command execution capabilities. This lets you hand full control of the device to the agent(s) running. This includes the ability to run potentially destructive code/commands. It is recommended to run it on a spare machine that contains no sensitive/valuable data and one that you do not mind wiping and resetting from time to time.
+* AI systems inherently navigate a trade-off between capability and safety; **Federate.AI leans heavily toward the capability aspect.** For safe and secure coding with AI assistance, please consider using [***KittySuite IDE***](https://www.rocklab.in/kittysuite), where the AI does not have the capability to execute code, run commands, or read files you don't explicitly share.
