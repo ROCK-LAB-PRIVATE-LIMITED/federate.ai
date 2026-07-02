@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "federate"
+version = "0.9.0"
+description = "A cross-platform terminal based p2p agent orchestration harness and universal automation system"
+readme = "README.md"
+license = {text = "Apache Software License"}
+requires-python = ">=3.11"
+authors = [
+    {name = "ROCK-LAB-PRIVATE-LIMITED", email = "arkadeep_ghosh@rocklab.in"},
+]
+keywords = ["ai", "agent", "tui", "coding", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+
+dependencies = [
+    "requests",
+    "textual>=0.40",
+    "langchain-openai",
+    "langchain-core",
+    "langgraph",
+    "rich",
+    "markdownify",
+    "markdown",
+    "tiktoken",
+    "beautifulsoup4",
+    "fake-useragent",
+    "numpy",
+    "pydantic",
+    "langgraph-checkpoint-sqlite",
+    "keyring",
+    "python-dotenv",
+    # Platform-specific hard dependencies
+    "pywinpty; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+# Audio / speech (optional — gracefully handled via ImportError)
+audio = [
+    "sounddevice",
+    "kokoro-onnx",
+    "sherpa-onnx",
+]
+# Telegram bot integration
+telegram = []
+# Browser-based UI serving
+browser = [
+    "textual-serve",
+]
+# All optional extras
+all = [
+    "federate[audio,browser]",
+]
+
+[project.scripts]
+federate = "meerkat.app:main"
+
+[project.urls]
+Homepage = "https://github.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai"
+Repository = "https://github.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai"
+Issues = "https://github.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+meerkat = ["bin/*"]

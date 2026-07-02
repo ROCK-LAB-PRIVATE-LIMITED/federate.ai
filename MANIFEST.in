@@ -1,0 +1,15 @@
+# Include Go source for building from sdist
+recursive-include go *.go *.mod *.sum
+include scripts/build_go.sh
+
+# Include package data
+recursive-include src/meerkat/bin *
+
+# Exclude dev/test files
+prune tests
+prune venv
+prune __pycache__
+prune meerkat.build
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude *.db
