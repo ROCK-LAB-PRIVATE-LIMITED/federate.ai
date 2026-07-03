@@ -112,11 +112,11 @@ jobs:
           if [ -n "${{ matrix.cc }}" ]; then
             export CC=${{ matrix.cc }}
           fi
-          mkdir -p src/meerkat/bin
+          mkdir -p src/federate/bin
           cd go
-          go build -ldflags="-s -w" -o ../src/meerkat/bin/meerkat_bridge${{ matrix.suffix }} ./cmd/bridge/main.go
-          go build -ldflags="-s -w" -o ../src/meerkat/bin/meerkat_embed${{ matrix.suffix }} ./cmd/embed/main.go
-          go build -ldflags="-s -w" -o ../src/meerkat/bin/meerkat_search${{ matrix.suffix }} ./cmd/search/main.go
+          go build -ldflags="-s -w" -o ../src/federate/bin/federate_bridge${{ matrix.suffix }} ./cmd/bridge/main.go
+          go build -ldflags="-s -w" -o ../src/federate/bin/federate_embed${{ matrix.suffix }} ./cmd/embed/main.go
+          go build -ldflags="-s -w" -o ../src/federate/bin/federate_search${{ matrix.suffix }} ./cmd/search/main.go
 
       # --- Build Android Termux Binaries via NDK ---
       - name: Compile Go Sidecars (Android)
@@ -129,11 +129,11 @@ jobs:
           CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           CXX: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
         run: |
-          mkdir -p src/meerkat/bin
+          mkdir -p src/federate/bin
           cd go
-          go build -ldflags="-s -w" -o ../src/meerkat/bin/meerkat_bridge ./cmd/bridge/main.go
-          go build -ldflags="-s -w" -o ../src/meerkat/bin/meerkat_embed ./cmd/embed/main.go
-          go build -ldflags="-s -w" -o ../src/meerkat/bin/meerkat_search ./cmd/search/main.go
+          go build -ldflags="-s -w" -o ../src/federate/bin/federate_bridge ./cmd/bridge/main.go
+          go build -ldflags="-s -w" -o ../src/federate/bin/federate_embed ./cmd/embed/main.go
+          go build -ldflags="-s -w" -o ../src/federate/bin/federate_search ./cmd/search/main.go
 
       - name: Build Platform Wheel
         run: |
