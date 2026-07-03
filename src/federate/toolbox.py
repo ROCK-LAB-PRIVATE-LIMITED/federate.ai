@@ -782,17 +782,18 @@ def run_terminal_command(command: str) -> str:
 def curl_url(url: str) -> str:
     """Fetches text/HTML content from a URL."""
     try:
-        from bs4 import BeautifulSoup  # Required for reference logic
+        from bs4 import BeautifulSoup
+        from curl_cffi import requests as cffi_requests
+        from markdownify import markdownify as md
+        
         check_abort()
         log_tool(f"Fetching URL:[/cyan] {url}")
         
-        ua = UserAgent()
-        headers = {
-            'User-Agent': ua.random,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        }
-        
-        resp = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+
+        # Bypasses Cloudflare/WAFs using Chrome TLS impersonation
+        resp = cffi_requests.get(url, impersonate="chrome", timeout=150, allow_redirects=True)
         resp.raise_for_status()
         
         check_abort()
@@ -981,32 +982,35 @@ def get_total_tokens(messages: List[BaseMessage]) -> int:
 
 def scrape_full_content(url: str, max_tokens_per_fetch: int = 30000) -> str:
     try:
-        headers = {"User-Agent": UserAgent().random}
-        with requests.Session() as session:
-            with session.get(url, headers=headers, timeout=15, stream=True) as resp:
-                resp.raise_for_status()
-                max_bytes = 1_000_000 
-                content = b""
+        from curl_cffi import requests as cffi_requests
+        
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+
+        with cffi_requests.Session(impersonate="chrome") as session:
+            resp = session.get(url, timeout=15, stream=True, allow_redirects=True)
+            resp.raise_for_status()
+            
+            max_bytes = 1_000_000 
+            content = b""
+            
+            # --- THE FIX: Absolute Time Limit ---
+            start_time = time.time()
+            
+            for chunk in resp.iter_content(chunk_size=8192):
+                content += chunk
                 
-                # --- THE FIX: Absolute Time Limit ---
-                start_time = time.time()
-                
-                for chunk in resp.iter_content(chunk_size=8192):
-                    content += chunk
+                # Size Kill-Switch
+                if len(content) > max_bytes:
+                    safe_print(f"[NETWORK] Kill switch engaged: Page exceeds 1MB. Stopping download.")
+                    break
                     
-                    # Size Kill-Switch
-                    if len(content) > max_bytes:
-                        safe_print(f"[NETWORK] Kill switch engaged: Page exceeds 1MB. Stopping download.")
-                        resp.close()
-                        break
-                        
-                    # Time Kill-Switch (Abort if page takes longer than 20 seconds to stream)
-                    if time.time() - start_time > 20:
-                        safe_print(f"  [NETWORK] Time switch engaged: Server too slow (>20s). Aborting.")
-                        resp.close()
-                        break
-                        
-                raw_html = content.decode("utf-8", errors="ignore")
+                # Time Kill-Switch (Abort if page takes longer than 120 seconds to stream)
+                if time.time() - start_time > 120:
+                    safe_print(f"  [NETWORK] Time switch engaged: Server too slow (>20s). Aborting.")
+                    break
+                    
+            raw_html = content.decode("utf-8", errors="ignore")
 
         soup = BeautifulSoup(raw_html, "html.parser")
         for tag in soup(["script", "style", "noscript", "form", "svg", "img", "iframe", "button"]):

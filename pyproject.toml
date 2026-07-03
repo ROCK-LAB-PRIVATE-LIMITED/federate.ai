@@ -43,6 +43,9 @@ dependencies = [
     "langgraph-checkpoint-sqlite",
     "keyring",
     "python-dotenv",
+    "pylatexenc",  # Compulsory LaTeX parser for mathematical unicode rendering
+    "pyperclip",   # Compulsory clipboard support for IDE copies/cuts
+    "curl-cffi",   # Compulsory HTTP client with impersonation support (Cloudflare bypass)
     # Platform-specific hard dependencies
     "pywinpty; platform_system == 'Windows'",
 ]
@@ -54,6 +57,15 @@ audio = [
     "kokoro-onnx",
     "sherpa-onnx",
 ]
+# Autonomous Visual Computer Use / Computer Vision (optional)
+vision = [
+    "pyautogui",
+    "pillow",
+]
+# PDF report generation for Deep Research (optional)
+pdf = [
+    "weasyprint",
+]
 # Telegram bot integration
 telegram = []
 # Browser-based UI serving
@@ -62,7 +74,7 @@ browser = [
 ]
 # All optional extras
 all = [
-    "federate[audio,browser]",
+    "federate[audio,browser,vision,pdf]",
 ]
 
 [project.scripts]
