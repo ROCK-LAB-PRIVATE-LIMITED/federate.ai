@@ -1897,7 +1897,7 @@ def prepare_active_skill(tool_name: str, source_paths: List[str], entry_point: s
         
         # 2. Setup Venv
         venv_dir = get_storage_path(staging_dir, "venv")
-        subprocess.run([sys.executable, "-m", "venv", venv_dir], check=True)
+        subprocess.run([sys.executable, "-m", "venv", venv_dir], check=True, stdin=subprocess.DEVNULL)
         python_exe = _get_venv_python(venv_dir)
         
         env = os.environ.copy()
@@ -1912,19 +1912,19 @@ def prepare_active_skill(tool_name: str, source_paths: List[str], entry_point: s
             for cmd_str in pre_install_commands:
                 log_tool(f"  Executing: {cmd_str}")
                 # We run these commands in the logic directory
-                subprocess.run(cmd_str, shell=True, check=True, env=env, cwd=get_storage_path(staging_dir, "logic"))
+                subprocess.run(cmd_str, shell=True, check=True, env=env, cwd=get_storage_path(staging_dir, "logic"), stdin=subprocess.DEVNULL)
 
         # 4. Install Dependencies
         # Phase 1: PyPI
         if dependencies:
             log_tool(f"Installing PyPI dependencies for {tool_name}: {', '.join(dependencies)}")
-            subprocess.run([python_exe, "-m", "pip", "install"] + dependencies, check=True, capture_output=True, env=env)
+            subprocess.run([python_exe, "-m", "pip", "install"] + dependencies, check=True, capture_output=True, env=env, stdin=subprocess.DEVNULL)
             
         # Phase 2: Custom Source Paths
         if custom_dependency_paths:
             for cp in custom_dependency_paths:
                 log_tool(f"Installing custom source dependency: {cp}")
-                subprocess.run([python_exe, "-m", "pip", "install", cp], check=True, capture_output=True, env=env)
+                subprocess.run([python_exe, "-m", "pip", "install", cp], check=True, capture_output=True, env=env, stdin=subprocess.DEVNULL)
 
         # 5. Test Run
         log_tool(f"Performing validation run for {tool_name}...")
@@ -1954,7 +1954,7 @@ def prepare_active_skill(tool_name: str, source_paths: List[str], entry_point: s
                 cmd.extend([f"--{k}", val_str])
         # --------------------------------------
         
-        proc = subprocess.run(cmd, text=True, capture_output=True, cwd=get_storage_path(staging_dir, "logic"), env=env)
+        proc = subprocess.run(cmd, text=True, capture_output=True, cwd=get_storage_path(staging_dir, "logic"), env=env, stdin=subprocess.DEVNULL)
         
         stdout = proc.stdout
         stderr = proc.stderr

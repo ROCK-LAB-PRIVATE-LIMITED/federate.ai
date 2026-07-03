@@ -87,7 +87,7 @@ To protect your workspace, the system boots in **SAFE (PLAN)** mode. In this mod
   * **`F5`**: Cycle the host agent
   * **`F6`**: Cycle through UI panels (Chat ↔ IDE Editor ↔ Executions Dashboard)
   * **`F8`**: Change your workspace directory
-  * **`Ctrl+K`**: Wipe the memory of all agents
+  * **`Ctrl+K`**: Start fresh conversation
   * **`Ctrl+A`**: **ABORT** (Emergency stop for any running AI tasks or terminal commands)
   * **`Ctrl+Q`**: Quit Federate.AI
 
