@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "federate"
-version = "0.9.3"
+version = "0.9.4"
 description = "A cross-platform terminal based p2p agent orchestration harness and universal automation system"
 readme = "README.md"
 license = {text = "Apache Software License"}
@@ -77,4 +77,4 @@ Issues = "https://github.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/issues"
 where = ["src"]
 
 [tool.setuptools.package-data]
-federate = ["bin/*"]
+federate = ["bin/*", "styles/*", "styles/fonts/*"]

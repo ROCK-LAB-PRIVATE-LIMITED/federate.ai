@@ -947,12 +947,20 @@ def render_markdown_to_pdf(md_path: str, pdf_path: str):
 
         html_text = markdown(md_text, extensions=["fenced_code", "tables", "toc", "codehilite", "extra"])
         
-        from pathlib import Path
+        # 1. Check for user-defined overrides inside the active workspace
         css_file = Path("styles/style.css")
-        if not css_file.exists(): css_file = Path("style.css")
+        if not css_file.exists(): 
+            css_file = Path("style.css")
+            
+        # 2. Fall back to the system-default stylesheet bundled next to the code
+        if not css_file.exists():
+            package_dir = os.path.dirname(os.path.abspath(__file__))
+            css_file = Path(package_dir) / "styles" / "style.css"
 
         html = HTML(string=html_text, base_url=str(Path.cwd()))
         if css_file.exists():
+            # WeasyPrint automatically resolves relative font links inside the CSS
+            # (like src: url('fonts/font.ttf')) relative to the CSS filename path passed below.
             html.write_pdf(pdf_path, stylesheets=[CSS(filename=str(css_file))])
         else:
             html.write_pdf(pdf_path)

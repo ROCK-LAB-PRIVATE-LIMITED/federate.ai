@@ -1,0 +1,60 @@
+@import url('https://fonts.googleapis.com/css2?family=Michroma&family=Space+Grotesk:wght@300;400;700&family=Space+Mono&display=swap');
+
+body {
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 11pt;
+  line-height: 1.6;
+  color: #111;
+}
+
+h1, h2, h3, h4 {
+  font-family: "Michroma", sans-serif;
+  letter-spacing: 0.04em;
+  margin-top: 2em;
+}
+
+code, pre {
+  font-family: "Space Mono", monospace;
+  font-size: 9.5pt;
+}
+
+pre {
+  background: #0f1117;
+  color: #e6e6e6;
+  padding: 1em;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+@page {
+  size: A4;
+  margin: 20mm;
+
+  @bottom-left {
+    /* This creates the "Page X of Y" effect */
+    content: "Page " counter(page) " of " counter(pages);
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 8pt;
+    color: #666;
+  }
+
+  @bottom-right {
+    content: "ROCK LAB PRIVATE LIMITED";
+    font-family: "Michroma", sans-serif;
+    font-size: 8pt;
+    color: #666;
+  }
+}
+
+h1, h2 {
+  page-break-before: always;
+}
+
+h1 {
+  break-before: page;
+  text-align: center;
+  margin-top: 40%;
+  font-size: 28pt;
+  letter-spacing: 0.08em;
+}
+
