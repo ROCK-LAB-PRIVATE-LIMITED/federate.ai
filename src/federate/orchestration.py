@@ -127,8 +127,13 @@ class AgentConfig:
         skills_dir = os.path.join(agents_dir, "skills", safe_name)
         os.makedirs(skills_dir, exist_ok=True)
         
-        passive_skills = [f.replace(".md", "") for f in os.listdir(skills_dir) if f.endswith(".md")]
-        active_skills = [f.replace(".json", "") for f in os.listdir(skills_dir) if f.endswith(".json")]
+        active_tools_dir = os.path.join(skills_dir, "active_tools")
+        active_skills = []
+        if os.path.exists(active_tools_dir):
+            active_skills = [d for d in os.listdir(active_tools_dir) if os.path.isdir(os.path.join(active_tools_dir, d))]
+            
+        all_mds = [f.replace(".md", "") for f in os.listdir(skills_dir) if f.endswith(".md")]
+        passive_skills = [m for m in all_mds if m not in active_skills]
         
         passive_list = ", ".join(passive_skills) if passive_skills else "No playbooks learned yet."
         active_list = ", ".join(active_skills) if active_skills else "No executable tools learned yet."
@@ -147,7 +152,10 @@ class AgentConfig:
         prompt += "\n- PASSIVE SKILLS: Use `read_skill` to read the steps for a playbook listed in your library."
         prompt += "\n- ACTIVE SKILLS: These are executable tools you can call directly. If a task matches an Active Skill name, call it like any other tool. You MUST use the exact parameter names defined in the tool's schema."
         prompt += "\n- EVOLUTION (Learning New Tools): To permanently learn a new executable tool, follow these steps:"
-        prompt += "\n  1. WRITE LOGIC: Use `save_file` to write your script(s). Prefer standard positional arguments (e.g., `sys.argv[1]`)."
+        prompt += "\n  1. WRITE LOGIC: Use `save_file` to write your script(s). You can handle arguments in two ways:"
+        prompt += "\n     - Positional Mode (Recommended): Read from `sys.argv[1]`, `sys.argv[2]`, etc. To use this, you MUST specify the parameter sequence in the `arg_order` list when finalizing."
+        prompt += "\n     - Keyword Mode (Default): Arguments are passed to your script as CLI flags (e.g., `--param_name value`). Your script must parse these (e.g. using `argparse`)."
+        prompt += "\n     - CRITICAL: Your validation test script must print diagnostic results or confirmations to STDOUT. If STDOUT is blank during the test run, validation will fail."
         prompt += "\n  2. STAGE & TEST: Use `prepare_active_skill`. Provide the tool name, paths to scripts, entry point, and `pip` dependencies. Use `test_input` for validation."
         prompt += "\n     - TIP (Custom Builds): If your tool needs to build a local C++ library or install a custom package from source, use `pre_install_commands` for shell scripts (e.g., CMake/Make) and `custom_dependency_paths` for local pip installs (absolute paths)."
         prompt += "\n  3. EVALUATE: Review STDOUT/STDERR. If the tool worked correctly, proceed to Stage 4."

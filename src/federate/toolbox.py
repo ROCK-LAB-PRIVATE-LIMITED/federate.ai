@@ -1897,7 +1897,7 @@ def prepare_active_skill(tool_name: str, source_paths: List[str], entry_point: s
         
         # 2. Setup Venv
         venv_dir = get_storage_path(staging_dir, "venv")
-        subprocess.run([sys.executable, "-m", "venv", venv_dir], check=True, stdin=subprocess.DEVNULL)
+        subprocess.run([sys.executable, "-m", "venv", venv_dir], check=True, stdin=subprocess.DEVNULL, capture_output=True, text=True)
         python_exe = _get_venv_python(venv_dir)
         
         env = os.environ.copy()
@@ -1912,7 +1912,7 @@ def prepare_active_skill(tool_name: str, source_paths: List[str], entry_point: s
             for cmd_str in pre_install_commands:
                 log_tool(f"  Executing: {cmd_str}")
                 # We run these commands in the logic directory
-                subprocess.run(cmd_str, shell=True, check=True, env=env, cwd=get_storage_path(staging_dir, "logic"), stdin=subprocess.DEVNULL)
+                subprocess.run(cmd_str, shell=True, check=True, env=env, cwd=get_storage_path(staging_dir, "logic"), stdin=subprocess.DEVNULL, capture_output=True, text=True)
 
         # 4. Install Dependencies
         # Phase 1: PyPI
@@ -1973,11 +1973,24 @@ def prepare_active_skill(tool_name: str, source_paths: List[str], entry_point: s
             
         result = f"--- TEST RUN RESULTS ({tool_name}) ---\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}\n\n"
         if proc.returncode == 0:
-            result += "SUCCESS: Tool executed correctly. Call 'finalize_active_skill' to register it."
+            if not stdout.strip():
+                result += "FAILURE: Tool executed with exit code 0 but returned EMPTY stdout. A valid tool must print some output or confirmation to STDOUT during the test validation run."
+            else:
+                result += "SUCCESS: Tool executed correctly. Call 'finalize_active_skill' to register it."
         else:
             result += f"FAILURE: Tool exited with code {proc.returncode}. Fix the logic and try again."
         return result
         
+    except subprocess.CalledProcessError as e:
+        if os.path.exists(staging_dir):
+            import shutil
+            shutil.rmtree(staging_dir)
+        err_msg = f"Command '{e.cmd}' returned non-zero exit status {e.returncode}."
+        if e.stderr:
+            err_msg += f"\nSTDERR:\n{e.stderr}"
+        if e.stdout:
+            err_msg += f"\nSTDOUT:\n{e.stdout}"
+        return f"Error during staging: {err_msg}"
     except Exception as e:
         if os.path.exists(staging_dir): 
             import shutil
@@ -2235,6 +2248,50 @@ def read_skill(skill_name: str, config: RunnableConfig) -> str:
             return f.read()
 
     return f"Skill '{skill_name}' not found in library (Checked .md and .json)."
+
+@tool
+def delete_passive_skill(skill_name: str, config: RunnableConfig) -> str:
+    """Deletes a passive skill (playbook/steps) from your procedural memory library."""
+    agent_name = _get_agent(config)
+    skills_dir = get_storage_path("agents", "skills", agent_name)
+    safe_name = "".join([c if c.isalnum() or c == '_' else "_" for c in skill_name])
+    path = get_storage_path(skills_dir, f"{safe_name}.md")
+    
+    if os.path.exists(path):
+        os.remove(path)
+        return f"Success: Passive skill '{safe_name}' has been permanently deleted from {agent_name}'s library."
+    return f"Error: Passive skill '{skill_name}' (filename: '{safe_name}.md') not found."
+
+@tool
+def list_skills(config: RunnableConfig) -> str:
+    """Lists all passive playbooks and active executable tools currently stored in your skills library."""
+    agent_name = _get_agent(config)
+    skills_dir = get_storage_path("agents", "skills", agent_name)
+    
+    passive_skills = []
+    active_skills = []
+    
+    if os.path.exists(skills_dir):
+        passive_skills = [f.replace(".md", "") for f in os.listdir(skills_dir) if f.endswith(".md")]
+        active_tools_dir = get_storage_path("agents", "skills", agent_name, "active_tools")
+        if os.path.exists(active_tools_dir):
+            active_skills = [d for d in os.listdir(active_tools_dir) if os.path.isdir(os.path.join(active_tools_dir, d))]
+            
+    output = f"Skills Library for {agent_name}:\n\n"
+    output += "Passive Skills (Use 'read_skill' to read steps):\n"
+    if passive_skills:
+        output += "\n".join(f"- {p}" for p in sorted(passive_skills))
+    else:
+        output += "- None"
+        
+    output += "\n\nActive Skills (Call these directly as tools):\n"
+    if active_list := ", ".join(active_skills):
+        output += active_list
+    else:
+        output += "None"
+        
+    return output
+
 @tool
 def distill_journey(skill_name: str, task_summary: str, successful_steps: str, config: RunnableConfig) -> str:
     """Distills a successful workflow into procedural memory so you can repeat it in the future."""

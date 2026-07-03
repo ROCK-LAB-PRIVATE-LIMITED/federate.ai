@@ -17,6 +17,7 @@ SLASH_COMMANDS =[
     "/telegram",
     "/select_agent", "/clear_all",
     "/dpi", "/schedule",
+    "/skills",
     "/help"
 ]
 
@@ -443,6 +444,45 @@ def process_slash_command(command: str, agent_view):
         except ValueError:
             agent_view.log_to_ui("[bold red]Usage: /dpi <number>[/bold red]")
                 
+    elif cmd == "/skills":
+        from toolbox import get_storage_path
+        active_agent = getattr(agent_view, "active_agent", None)
+        if not active_agent:
+            agent_view.log_to_ui("[bold red]Error: No active agent configured.[/bold red]")
+            return
+            
+        safe_name = active_agent.name.replace(" ", "_")
+        skills_dir = get_storage_path("agents", "skills", safe_name)
+        
+        passive_skills = []
+        active_skills = []
+        
+        if os.path.exists(skills_dir):
+            active_tools_dir = get_storage_path("agents", "skills", safe_name, "active_tools")
+            if os.path.exists(active_tools_dir):
+                active_skills = [d for d in os.listdir(active_tools_dir) if os.path.isdir(os.path.join(active_tools_dir, d))]
+                
+            all_mds = [f.replace(".md", "") for f in os.listdir(skills_dir) if f.endswith(".md")]
+            passive_skills = [m for m in all_mds if m not in active_skills]
+        
+        output = f"### 🗃️ Skills Library for [bold {active_agent.color}]{active_agent.name}[/bold {active_agent.color}]\n\n"
+        
+        output += "**Passive Skills (Playbooks):**\n"
+        if passive_skills:
+            for p in sorted(passive_skills):
+                output += f"- `{p}`\n"
+        else:
+            output += "- *None learned yet.*\n"
+            
+        output += "\n**Active Skills (Executable Tools):**\n"
+        if active_skills:
+            for a in sorted(active_skills):
+                output += f"- `{a}`\n"
+        else:
+            output += "- *None learned yet.*\n"
+            
+        agent_view.log_to_ui(output, is_markdown=True)
+
     elif cmd == "/help":
         help_text = """
 ### 🛠️ Available Chat Commands
@@ -463,6 +503,7 @@ def process_slash_command(command: str, agent_view):
 | `/clear_all` | Wipe memory for all agents. |
 | `/telegram` | Configure and activate the Telegram Bot integration. |
 | `/schedule` | Open the automated daily task scheduler menu. |
+| `/skills` | List all passive and active skills currently available to the active agent. |
 
 ### ⚡ Interactive Features
 - **File Injection:** Type `&` followed by a file or directory path (e.g. `&src/main.py`). Press **`UP/DOWN`** to dynamically cycle through available files! Hit `ENTER` to inject their content into the AI's prompt context.

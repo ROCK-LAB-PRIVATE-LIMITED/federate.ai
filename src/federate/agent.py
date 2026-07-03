@@ -106,7 +106,7 @@ from toolbox import (
     send_scroll,
     inject_keyboard_input
 )
-from toolbox import shared_memory, update_core_memory, save_skill, read_skill, distill_journey, mark_quagmire
+from toolbox import shared_memory, update_core_memory, save_skill, read_skill, distill_journey, mark_quagmire, delete_passive_skill, list_skills
 import time
 import toolbox
 from subagents import dispatch_subagent
@@ -534,6 +534,7 @@ SLASH_COMMAND_DESCS = {
     "/telegram": "Configure Telegram Bot integration",
     "/select_agent": "Switch the active host agent",
     "/clear_all": "Wipe memory and history of all agents",
+    "/skills": "List all passive and active skills for the active agent",
     "/help": "Show this detailed help menu"
 }
 
@@ -1133,8 +1134,14 @@ def get_welcome_banner(agent_view) -> str:
     active_count = 0
     if os.path.exists(skills_dir):
         try:
-            passive_count = sum(1 for f in os.listdir(skills_dir) if f.endswith(".md"))
-            active_count = sum(1 for f in os.listdir(skills_dir) if f.endswith(".json"))
+            active_tools_dir = os.path.join(skills_dir, "active_tools")
+            active_list = []
+            if os.path.exists(active_tools_dir):
+                active_list = [d for d in os.listdir(active_tools_dir) if os.path.isdir(os.path.join(active_tools_dir, d))]
+            active_count = len(active_list)
+            
+            all_mds = [f.replace(".md", "") for f in os.listdir(skills_dir) if f.endswith(".md")]
+            passive_count = sum(1 for m in all_mds if m not in active_list)
         except Exception:
             pass
 
@@ -1733,7 +1740,7 @@ class AIAgentView(Vertical):
             model_kwargs={"reasoning_effort": "high"}
         )
         
-        tools =[list_files, search_web, perform_research, manage_agenda, update_core_memory, save_skill, read_skill, distill_journey, mark_quagmire, get_user_clarification, search_episodic_memory, retrieve_episodic_memory, prepare_active_skill, finalize_active_skill, manage_active_skill, fix_active_skill]
+        tools =[list_files, search_web, perform_research, manage_agenda, update_core_memory, save_skill, read_skill, distill_journey, delete_passive_skill, list_skills, mark_quagmire, get_user_clarification, search_episodic_memory, retrieve_episodic_memory, prepare_active_skill, finalize_active_skill, manage_active_skill, fix_active_skill]
 
         # Load dynamic tools from Skills (Active Skills)
         dynamic_tools = load_dynamic_tools(agent_config.name)
