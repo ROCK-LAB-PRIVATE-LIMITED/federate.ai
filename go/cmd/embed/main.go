@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/neurosnap/sentences/english"
@@ -36,8 +37,23 @@ func main() {
 
 	// 2. Load Model
 	modelName := "sentence-transformers/all-MiniLM-L6-v2"
+	
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting home directory: %v\n", err)
+		os.Exit(1)
+	}
+	modelsDir := filepath.Join(homeDir, ".federate", "models")
+	
+	// Create the global models directory if it doesn't exist
+	err = os.MkdirAll(modelsDir, 0755)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating models directory: %v\n", err)
+		os.Exit(1)
+	}
+
 	conf := &tasks.Config{
-		ModelsDir:      "models",
+		ModelsDir:      modelsDir,
 		ModelName:      modelName,
 		DownloadPolicy: tasks.DownloadMissing,
 	}

@@ -192,7 +192,8 @@ def process_slash_command(command: str, agent_view):
             "save_file": "EXECUTE",
             "edit_file": "EXECUTE",
             "run_terminal_command": "EXECUTE",
-            "dispatch_subagent": "EXECUTE"
+            "dispatch_subagent": "EXECUTE",
+            "visual_computer_operation": "EXECUTE"
         }
         
         output = "[bold cyan]🛠️ Available Tools Status:[/bold cyan]\n\n"
@@ -208,10 +209,11 @@ def process_slash_command(command: str, agent_view):
             else:
                 status = "[dim red]INACTIVE (Requires SEMI-ARMED or ARMED mode)[/dim red]"
                 
+            display_name = "Autonomous Visual Computer Operation" if t == "visual_computer_operation" else t
             if desc:
-                output += f" - [bold]{t}[/bold]: {status}\n"
+                output += f" - [bold]{display_name}[/bold]: {status}\n"
             else:
-                output += f" - {t} - {status}\n"
+                output += f" - {display_name} - {status}\n"
                 
         agent_view.log_to_ui(output, is_markdown=False)
         

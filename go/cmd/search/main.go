@@ -4,12 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"os"
 	"strconv"
-	"time"
 
 	"websearch"
+
 	"websearch/provider"
 	"websearch/provider/errs"
 )
@@ -21,12 +20,7 @@ type SearchResult struct {
 }
 
 func PerformSearch(query string, limit int) (res []SearchResult, err error) {
-	// 1. Random delay to mitigate rate limiting
-	rand.Seed(time.Now().UnixNano())
-	delay := 15 + rand.Float64()*30 // 15 to 30 seconds
-	time.Sleep(time.Duration(delay * float64(time.Second)))
-
-	// 2. Panic recovery to handle scraper breakages gracefully
+	// Panic recovery to handle scraper breakages gracefully
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("Web search temporarily unavailable")
@@ -59,7 +53,7 @@ func PerformSearch(query string, limit int) (res []SearchResult, err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: federate_search <query>[limit]")
+		fmt.Fprintln(os.Stderr, "Usage: meerkat_search <query>[limit]")
 		os.Exit(1)
 	}
 

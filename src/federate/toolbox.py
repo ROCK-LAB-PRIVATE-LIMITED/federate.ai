@@ -13,10 +13,63 @@ import uuid
 import io
 import base64
 import traceback
+import json
 import tiktoken
 import time
+import random
+from pathlib import Path
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
+
+_LAST_LLM_CALL_TIME = 0.0
+_LLM_LOCK = threading.Lock()
+_DYNAMIC_PACING_DELAY = 65.0  # Safe 65s baseline (65 +- 9s on boot)
+
+# Persistent search pacing state file (RFC 1918 & cross-restart safety)
+_SEARCH_STATE_PATH = os.path.join(str(Path.home()), ".federate", "search_state.json")
+
+def _load_last_search_time() -> float:
+    try:
+        if os.path.exists(_SEARCH_STATE_PATH):
+            with open(_SEARCH_STATE_PATH, "r", encoding="utf-8") as f:
+                return float(json.load(f).get("last_search_time", 0.0))
+    except Exception:
+        pass
+    return 0.0
+
+def _save_last_search_time(t: float):
+    try:
+        os.makedirs(os.path.dirname(_SEARCH_STATE_PATH), exist_ok=True)
+        with open(_SEARCH_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"last_search_time": t}, f)
+    except Exception:
+        pass
+
+_LAST_SEARCH_TIME = _load_last_search_time()
+_SEARCH_LOCK = threading.Lock()
+
+def _get_search_delay() -> float:
+    """Paces searches globally across all threads, spacing them by 65 +- 9 seconds."""
+    global _LAST_SEARCH_TIME
+    with _SEARCH_LOCK:
+        now = time.time()
+        jitter = random.uniform(-9.0, 9.0)
+        pacing_target = 65.0 + jitter
+        
+        if now - _LAST_SEARCH_TIME > pacing_target:
+            _LAST_SEARCH_TIME = now - pacing_target
+            
+        elapsed = now - _LAST_SEARCH_TIME
+        if elapsed < pacing_target:
+            sleep_needed = pacing_target - elapsed
+        else:
+            sleep_needed = 0.0
+            
+        _LAST_SEARCH_TIME = min(now + sleep_needed, now + pacing_target * 4.5)
+        # Persist to disk so it survives app crashes and restarts
+        _save_last_search_time(_LAST_SEARCH_TIME)
+    return sleep_needed
+    
 from markdown import markdown
 from fake_useragent import UserAgent
 #from ddgs import DDGS
@@ -27,7 +80,7 @@ from pydantic import BaseModel, Field, create_model
 from typing import TypedDict, Annotated, Dict, List, Optional, Any
 
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, BaseMessage
+from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langchain_core.runnables import RunnableConfig
@@ -169,18 +222,119 @@ def _get_agent(config: RunnableConfig) -> str:
 
 def resilient_invoke(model, messages):
     """Wraps raw LLM calls in a retry loop, but fails fast on fatal API errors."""
+    global _LAST_LLM_CALL_TIME, _DYNAMIC_PACING_DELAY
     for attempt in range(20): 
         check_abort()
+        sleep_needed = 0.0
+        
+        # Check if we are running a local model (loopback, LAN IP, or mDNS domain) to bypass pacing entirely
+        base_url = getattr(model, "base_url", "") or getattr(model, "openai_api_base", "")
+        is_local = False
+        if base_url:
+            base_url_str = str(base_url).lower().strip()
+            
+            from urllib.parse import urlparse
+            import ipaddress
+            
+            # Ensure a double slash scheme exists so urlparse extracts the hostname correctly
+            url_to_parse = base_url_str if "://" in base_url_str else "//" + base_url_str
+            try:
+                parsed = urlparse(url_to_parse)
+                hostname = parsed.hostname
+            except Exception:
+                hostname = None
+                
+            if hostname:
+                if hostname == "localhost" or hostname.endswith(".local") or hostname == "::1":
+                    is_local = True
+                else:
+                    try:
+                        ip = ipaddress.ip_address(hostname)
+                        if ip.is_private or ip.is_loopback:
+                            is_local = True
+                    except ValueError:
+                        pass
+                        
+            # Robust fallback for fuzzy string matches (handles raw IPs, custom ports, etc.)
+            if not is_local:
+                if "localhost" in base_url_str or ".local" in base_url_str or "::1" in base_url_str:
+                    is_local = True
+                else:
+                    clean_ip = base_url_str.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
+                    try:
+                        ip = ipaddress.ip_address(clean_ip)
+                        if ip.is_private or ip.is_loopback:
+                            is_local = True
+                    except ValueError:
+                        if any(clean_ip.startswith(prefix) for prefix in ["192.168.", "10.", "127."]):
+                            is_local = True
+                        elif clean_ip.startswith("172."):
+                            try:
+                                second_octet = int(clean_ip.split(".")[1])
+                                if 16 <= second_octet <= 31:
+                                    is_local = True
+                            except (IndexError, ValueError):
+                                pass
+        
+        # Universal Adaptive Pacing
+        if _DYNAMIC_PACING_DELAY > 0.0 and not is_local:
+            with _LLM_LOCK:
+                now = time.time()
+                # Apply the current delay with +/- 9s jitter to match the user's streamlined queue specs
+                jitter = random.uniform(-9.0, 9.0)
+                pacing_target = max(10.0, _DYNAMIC_PACING_DELAY + jitter)
+                
+                # If _LAST_LLM_CALL_TIME is far in the past, reset it to now
+                if now - _LAST_LLM_CALL_TIME > pacing_target:
+                    _LAST_LLM_CALL_TIME = now - pacing_target
+                    
+                elapsed = now - _LAST_LLM_CALL_TIME
+                if elapsed < pacing_target:
+                    sleep_needed = pacing_target - elapsed
+                else:
+                    sleep_needed = 0.0
+                
+                # Cap the virtual queue to prevent compounding sleeps from growing infinitely.
+                # Accommodates up to 4 parallel sub-agents staggered perfectly.
+                _LAST_LLM_CALL_TIME = min(now + sleep_needed, now + pacing_target * 4.5)
+                
+            if sleep_needed > 0:
+                # Sleep outside the lock in small increments to stay responsive to Ctrl+A (Abort)
+                for _ in range(int(sleep_needed * 10)):
+                    check_abort()
+                    time.sleep(0.1)
+                    
         try:
-            return model.invoke(messages)
+            res = model.invoke(messages)
+            # Successful call: rapidly decay the pacing delay back toward 0.0 for local/high-quota APIs
+            if _DYNAMIC_PACING_DELAY > 0.0:
+                with _LLM_LOCK:
+                    _DYNAMIC_PACING_DELAY = max(0.0, _DYNAMIC_PACING_DELAY - 1.5)
+            return res
         except Exception as e:
             error_str = str(e)
-            # Fail fast if the model is dead, missing, or rejecting our tool schema
-            if "400" in error_str or "404" in error_str or "not found" in error_str.lower() or "not exist" in error_str.lower():
+            error_str_lower = error_str.lower()
+            
+            # 1. Quota / Rate limits: dynamically scale up delay and bubble up to let run_subagent checkpoint
+            if any(term in error_str_lower for term in ["429", "ratelimit", "exhausted", "quota", "limit exceeded", "too many requests"]):
+                with _LLM_LOCK:
+                    if _DYNAMIC_PACING_DELAY < 56.0:
+                        _DYNAMIC_PACING_DELAY = 65.0  # Activate with a safe baseline of ~1 RPM
+                    else:
+                        _DYNAMIC_PACING_DELAY = min(120.0, _DYNAMIC_PACING_DELAY * 1.5)  # Scale up on subsequent hits
+                    # Reset queue time to "now" so waiting threads don't wait on stale future schedules
+                    _LAST_LLM_CALL_TIME = time.time()
+                raise e
+                
+            # 2. Fail fast if the model is dead, missing, or rejecting our tool schema
+            if "400" in error_str or "404" in error_str or "not found" in error_str_lower or "not exist" in error_str_lower:
                 safe_print(f"[bold red]❌ FATAL API ERROR:[/bold red] {escape(error_str)}")
                 raise e # Instantly crash the tool so the UI stops spinning
                 
-            safe_print(f"⚠️ Connection dropped or Rate Limit hit. Retrying in 15s... ({error_str})")
+            # 3. Standard connection drops: print a single-line summary and retry
+            first_line = error_str.splitlines()[0] if error_str else "Unknown connection issue"
+            clean_err = first_line[:120] + "..." if len(first_line) > 120 else first_line
+            safe_print(f"⚠️ Connection dropped. Retrying in 15s... ({clean_err})")
             time.sleep(15)
     raise Exception("Max network retries exceeded.")
 
@@ -660,11 +814,21 @@ def curl_url(url: str) -> str:
 @tool
 def search_web(query: str) -> str:
     """Search for current information, facts, websites, or general web content."""
+    # 1. Paced search delay (OUTSIDE the lock) using the global search pacing queue
     try:
         check_abort()
+        sleep_time = _get_search_delay()
+        if sleep_time > 0.0:
+            log_tool(f"⏳ Throttling search to prevent rate limits (sleeping {int(sleep_time)}s)...")
+            for _ in range(int(sleep_time * 10)):
+                check_abort()
+                time.sleep(0.1)
         log_tool(f"Searching for:[/cyan] '{query}'...")
-        #ddgs = DDGS()
-        
+    except Exception as e:
+        return f"Search failed: {str(e)}"
+
+    # 2. Execute search
+    try:
         import subprocess, json, os
         bin_path = get_storage_path(os.path.dirname(os.path.abspath(__file__)), "bin", "federate_search" + (".exe" if os.name == "nt" else ""))
         
@@ -715,8 +879,7 @@ def search_web(query: str) -> str:
             output += f"{i}. **{result.get('title', 'No title')}**\n"
             output += f"   {url}\n" 
             output += f"   {result.get('body', 'No description')[:250]}...\n\n"
-   
-            
+        
         return output
     except Exception as e:
         return f"Search failed: {str(e)}"
@@ -885,7 +1048,7 @@ def node_decide(state: AgentState):
         prompt = f"QUOTA MET: {tokens}/{TARGET_CONTEXT_TOKENS}. Use 'FinalResponse' tool to synthesize the report now."
         model = thread_context.llm.bind_tools([FinalResponse])
     
-    return {"messages": [resilient_invoke(model, [SystemMessage(content=prompt)] + state["messages"])]}
+    return {"messages": [resilient_invoke(model, state["messages"] + [HumanMessage(content=prompt)])]}
 
 def node_agent_select(state: AgentState):
     check_abort()
@@ -897,20 +1060,35 @@ def node_agent_select(state: AgentState):
         "YOU MUST USE ONE OF THESE TWO TOOLS."
     )
     model = thread_context.llm.bind_tools([FetchDetails, SearchWeb])
-    return {"messages": [resilient_invoke(model, [SystemMessage(content=prompt)] + state["messages"])]}
+    return {"messages": [resilient_invoke(model, state["messages"] + [HumanMessage(content=prompt)])]}
 
 def node_execute_search(state: AgentState):
     check_abort()
     last_msg = state["messages"][-1]
     tool_call = last_msg.tool_calls[0]
     query = tool_call["args"].get("query", "more details")
-    safe_print(f" [SEARCH] '{query}'")
     
     current_urls = state.get("hidden_urls", {})
     current_manifest = state.get("source_manifest", {})
     
+    # 1. Paced search delay (OUTSIDE the lock) using the global search pacing queue
     try:
         check_abort()
+        sleep_time = _get_search_delay()
+        if sleep_time > 0.0:
+            safe_print(f"⏳ Throttling search to prevent rate limits (sleeping {int(sleep_time)}s)...")
+            for _ in range(int(sleep_time * 10)):
+                check_abort()
+                time.sleep(0.1)
+        safe_print(f" [SEARCH] '{query}'")
+    except Exception as e:
+        if "aborted" in str(e).lower() or "interrupted" in str(e).lower(): raise e
+        content = f"Search Error: {e}"
+        return {"messages":[ToolMessage(content=content, tool_call_id=tool_call["id"], name="SearchWeb")],
+                "hidden_urls": current_urls, "source_manifest": current_manifest}
+
+    # 2. Execute search
+    try:
         import subprocess, json, os
         bin_path = get_storage_path(os.path.dirname(os.path.abspath(__file__)), "bin", "federate_search" + (".exe" if os.name == "nt" else ""))
         
@@ -985,19 +1163,19 @@ def node_final(state: AgentState):
     reference_table = "\n".join([f"[Source {i}]: {title}" for i, title in manifest.items()])
     
     final_instruction = f"""
-    CITATION LOOKUP TABLE (Use these numbers):
-    {reference_table}
+        CITATION LOOKUP TABLE (Use these numbers):
+        {reference_table}
 
-    CRITICAL INSTRUCTIONS:
-    1. Produce a massive, professional technical report.
-    2. You MUST cite your sources inline using [Source X] format.
-    3. Every claim or technical detail must be followed by at least one [Source X] tag.
-    4. Use the Lookup Table above to ensure the numbers match the correct information.
-    5. If response is shorter than {FINAL_ANSWER_MIN_LENGTH} tokens, it will be rejected.
-    """
+        CRITICAL INSTRUCTIONS:
+        1. Produce a massive, professional technical report.
+        2. You MUST cite your sources inline using [Source X] format.
+        3. Every claim or technical detail must be followed by at least one [Source X] tag.
+        4. Use the Lookup Table above to ensure the numbers match the correct information.
+        5. If response is shorter than {FINAL_ANSWER_MIN_LENGTH} tokens, it will be rejected.
+        """
     try:
         check_abort()
-        res = resilient_invoke(thread_context.llm, [SystemMessage(content=final_instruction)] + state["messages"])
+        res = resilient_invoke(thread_context.llm, state["messages"] + [HumanMessage(content=final_instruction)])
         if not res.content or len(res.content.strip()) < FINAL_ANSWER_MIN_LENGTH:
             return {"messages":[AIMessage(content="RETRY_REQUIRED: Final answer was blank or too short.")]}
         return {"messages": [res]}
@@ -1133,9 +1311,9 @@ def run_subagent(search_prompt, task_name, output_dir=".", config=None, batch_id
             if "interrupted" in error_str.lower() or "aborted" in error_str.lower():
                 raise e
                 
-            # 1. API Rate Limits
-            if "429" in error_str or "RateLimit" in error_str:
-                safe_print(f"⏳ {task_name}: API Rate Limit hit. Pausing 120s...")
+            # 1. API Rate Limits / Quota Exhaustion
+            if any(term in error_str.lower() for term in ["429", "ratelimit", "exhausted", "quota", "limit exceeded", "too many requests"]):
+                safe_print(f"⏳ {task_name}: API Rate Limit/Quota hit. Pausing 120s...")
                 time.sleep(120)
                 
             # 2. Database Write Collisions
@@ -1277,7 +1455,7 @@ class MasterOrchestrator:
             "TASK: You MUST call the 'ProjectName' tool to provide a professional project title. "
             "Do not respond with plain text. Use the tool."
         )
-        res = resilient_invoke(model_with_tools, [SystemMessage(content=prompt)])
+        res = resilient_invoke(model_with_tools, [SystemMessage(content=prompt), HumanMessage(content="Please proceed.")])
         
         # Fallback if model ignores tool calling
         if res.tool_calls: 
@@ -1297,7 +1475,7 @@ class MasterOrchestrator:
         
         for attempt in range(3):
             try:
-                res = resilient_invoke(model_with_tools, [SystemMessage(content=plan_prompt)])
+                res = resilient_invoke(model_with_tools, [SystemMessage(content=plan_prompt), HumanMessage(content="Please proceed.")])
                 if res.tool_calls:
                     tasks = res.tool_calls[0]["args"].get("tasks", [])
                     if tasks: return tasks
@@ -1355,7 +1533,7 @@ class MasterOrchestrator:
                 for i in range(10):
                     check_abort()
                     query_prompt = f"REPORT DATA: {combined_context}\nPREVIOUS: {json.dumps(search_history)}\nTASK: Generate a SINGLE, highly specific technical image search query for the NEXT image. Return ONLY the search query text."
-                    query = resilient_invoke(self.llm, [SystemMessage(content=query_prompt)]).content.strip().replace('"', '')
+                    query = resilient_invoke(self.llm, [SystemMessage(content=query_prompt), HumanMessage(content="Please proceed.")]).content.strip().replace('"', '')
                     safe_print(f" [MASTER] Turn {i+1}: Generating search for '{query}'")
                     
                     asset = vision_agent.find_and_verify_single_image(query, combined_context)
@@ -1381,7 +1559,24 @@ class MasterOrchestrator:
         2. You MUST integrate the images provided in the assets list into the flow of the text.
         3. Place the Markdown image tag immediately after the paragraph that references it.
         """
-        return resilient_invoke(self.llm,[SystemMessage(content=synthesis_prompt)]).content
+        
+        report_content = ""
+        for attempt in range(3):
+            check_abort()
+            res = resilient_invoke(self.llm, [SystemMessage(content=synthesis_prompt), HumanMessage(content="Please proceed.")])
+            report_content = res.content if res.content else ""
+            
+            report_lower = report_content.lower()
+            has_references = "reference" in report_lower or "sources" in report_lower
+            ends_cleanly = report_content.strip()[-1] in [".", "!", "?", "”", '"', "*", "\n"] if report_content.strip() else False
+            
+            # Simple length, reference, and completion validation check
+            if len(report_content) > 10000 and has_references and ends_cleanly:
+                break
+            else:
+                safe_print(f" [ORCHESTRATOR] Final report failed validation (Length: {len(report_content)} chars, Ends cleanly: {ends_cleanly}, Has references: {has_references}). Retrying full rewrite...")
+                
+        return report_content
 
 @tool
 def perform_research(topic: str, specific_instructions: str = "") -> str:

@@ -325,10 +325,10 @@ class ConfigModal(ModalScreen[str]):
     }
     """
     def __init__(self, agent_config: AgentConfig, agent_manager: AgentManager):
-        super().__init__()
-        self.agent_config = agent_config
-        self.agent_manager = agent_manager
-        self.high_priv_tools = ["read_file", "curl_url", "save_file", "edit_file", "dispatch_subagent", "run_terminal_command", "take_screenshot", "click_at_current_location", "move_cursor_absolute", "move_cursor_relative", "send_scroll", "inject_keyboard_input"]
+            super().__init__()
+            self.agent_config = agent_config
+            self.agent_manager = agent_manager
+            self.high_priv_tools = ["read_file", "curl_url", "save_file", "edit_file", "dispatch_subagent", "run_terminal_command", "visual_computer_operation"]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="config_dialog"):
@@ -359,7 +359,8 @@ class ConfigModal(ModalScreen[str]):
                     with VerticalScroll(id="abilities_container"):
                         for tool_name in self.high_priv_tools:
                             is_enabled = tool_name in self.agent_config.enabled_tools
-                            yield Checkbox(tool_name.replace("_", " ").title(), id=f"ability_{tool_name}", value=is_enabled)
+                            label = "Autonomous Visual Computer Operation" if tool_name == "visual_computer_operation" else tool_name.replace("_", " ").title()
+                            yield Checkbox(label, id=f"ability_{tool_name}", value=is_enabled)
 
                     yield Label("Backup Inference", classes="section_label")
                     agent_options = [("Manual Entry", "manual")] + [(name, name) for name in self.agent_manager.agents.keys()]
@@ -544,6 +545,7 @@ class ScheduleModal(ModalScreen[None]):
     .task_item { layout: horizontal; height: auto; padding: 1; border-bottom: solid $primary 50%; }
     .task_info { width: 1fr; }
     .task_del_btn { width: 10; margin-left: 1; margin-top: 1; }
+    .task_edit_btn { width: 10; margin-left: 1; margin-top: 1; }
     #add_form { border-top: solid $primary; padding-top: 1; height: auto; }
     .form_row { layout: horizontal; height: auto; margin-bottom: 1; }
     #new_agent { width: 40%; }
@@ -579,6 +581,7 @@ class ScheduleModal(ModalScreen[None]):
             info = f"[bold cyan]{t.agent_name}[/bold cyan] @ [bold yellow]{t.time_str}[/bold yellow]\n[dim]{t.prompt}[/dim]"
             row = Horizontal(
                 Label(info, classes="task_info"),
+                Button("Edit", id=f"edit_{t.id}", variant="primary", classes="task_edit_btn"),
                 Button("Delete", id=f"del_{t.id}", variant="error", classes="task_del_btn"),
                 classes="task_item"
             )
@@ -608,6 +611,19 @@ class ScheduleModal(ModalScreen[None]):
             task_id = btn_id[4:]
             self.agent_view.schedule_manager.delete_task(task_id)
             self.refresh_list()
+        elif btn_id and btn_id.startswith("edit_"):
+            task_id = btn_id[5:]
+            task = next((t for t in self.agent_view.schedule_manager.tasks if t.id == task_id), None)
+            if task:
+                # 1. Populate the input widgets with the existing properties
+                self.query_one("#new_agent", Select).value = task.agent_name
+                self.query_one("#new_time", Input).value = task.time_str
+                self.query_one("#new_prompt", Input).value = task.prompt
+                
+                # 2. Delete the old task and update the list
+                self.agent_view.schedule_manager.delete_task(task_id)
+                self.refresh_list()
+                self.notify("Loaded task into inputs for modification.", severity="information")
 
 class ChatInput(TextArea):
     """Custom Multiline TextArea that supports cycling suggestions and Enter-to-submit."""
@@ -878,11 +894,13 @@ def get_welcome_banner(agent_view) -> str:
         
     session_files = glob.glob(os.path.join(sessions_dir, "*.json"))
     
-    agent_tokens = {}
+    agent_input_tokens = {}
+    agent_output_tokens = {}
+    agent_total_tools = {}
+    agent_successful_tools = {}
     agent_collabs = {}
     total_conversations_all_time = set()
     total_conversations_target_month = set()
-    tools_called_target_month = 0
     
     valid_agents = set(agent_view.agent_manager.agents.keys())
     
@@ -928,19 +946,32 @@ def get_welcome_banner(agent_view) -> str:
             role = msg.get("role")
             content = msg.get("content") or ""
             
-            # Count tools called in target month
-            if is_target_month:
-                t_calls = msg.get("tool_calls") or []
-                t_outs = msg.get("tool_outputs") or []
-                tools_called_target_month += max(len(t_calls), len(t_outs))
-                
-            # If target month, accumulate tokens for the agent
+            msg_tokens = estimate_tokens(content)
+            
+            # Count tools called and inputs/outputs in target month
             if is_target_month:
                 total_conversations_target_month.add(session_id)
-                msg_tokens = estimate_tokens(content)
-                agent_tokens[matched_agent] = agent_tokens.get(matched_agent, 0) + msg_tokens
+                t_calls = msg.get("tool_calls") or []
+                t_outs = msg.get("tool_outputs") or []
                 
-                # Check for agent collaborations (summoned using @) in messages sent by this agent
+                # Accumulate tools
+                agent_total_tools[matched_agent] = agent_total_tools.get(matched_agent, 0) + len(t_calls)
+                for out in t_outs:
+                    if isinstance(out, dict):
+                        content_lower = str(out.get("content", "")).lower()
+                        if not any(term in content_lower for term in ["error:", "exception:", "failed:", "failed to"]):
+                            agent_successful_tools[matched_agent] = agent_successful_tools.get(matched_agent, 0) + 1
+                
+                # Accumulate Input vs Output tokens
+                if role == "human" or role == "system":
+                    agent_input_tokens[matched_agent] = agent_input_tokens.get(matched_agent, 0) + msg_tokens
+                    for out in t_outs:
+                        if isinstance(out, dict):
+                            agent_input_tokens[matched_agent] = agent_input_tokens.get(matched_agent, 0) + estimate_tokens(out.get("content", ""))
+                elif role == "ai":
+                    agent_output_tokens[matched_agent] = agent_output_tokens.get(matched_agent, 0) + msg_tokens
+                    
+                # Collaborators check
                 if role == "ai" and content:
                     mentions = agent_view.agent_manager.get_mentions(content)
                     if mentions:
@@ -952,7 +983,7 @@ def get_welcome_banner(agent_view) -> str:
 
     # Fallback logic if last calendar month had no activity
     used_month_name = last_day_last_month.strftime("%B")
-    if not agent_tokens:
+    if not agent_input_tokens and not agent_output_tokens:
         target_year = now.year
         target_month = now.month
         used_month_name = now.strftime("%B")
@@ -989,6 +1020,9 @@ def get_welcome_banner(agent_view) -> str:
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     history = json.load(f)
+                # Ensure the history parses correctly as a list of dicts
+                if not isinstance(history, list):
+                    history = []
             except Exception:
                 continue
                 
@@ -996,14 +1030,28 @@ def get_welcome_banner(agent_view) -> str:
                 if not isinstance(msg, dict):
                     continue
                 role = msg.get("role")
-                content = msg.get("content", "")
+                content = msg.get("content") or ""
                 
+                msg_tokens = estimate_tokens(content)
                 t_calls = msg.get("tool_calls") or []
                 t_outs = msg.get("tool_outputs") or []
-                tools_called_target_month += max(len(t_calls), len(t_outs))
                 
-                tokens = estimate_tokens(content) + sum(estimate_tokens(str(o.get("content", ""))) for o in (msg.get("tool_outputs") or []) if isinstance(o, dict))
-                agent_tokens[matched_agent] = agent_tokens.get(matched_agent, 0) + tokens
+                # Accumulate tools
+                agent_total_tools[matched_agent] = agent_total_tools.get(matched_agent, 0) + len(t_calls)
+                for out in t_outs:
+                    if isinstance(out, dict):
+                        content_lower = str(out.get("content", "")).lower()
+                        if not any(term in content_lower for term in ["error:", "exception:", "failed:", "failed to"]):
+                            agent_successful_tools[matched_agent] = agent_successful_tools.get(matched_agent, 0) + 1
+                
+                # Accumulate Input vs Output tokens
+                if role == "human" or role == "system":
+                    agent_input_tokens[matched_agent] = agent_input_tokens.get(matched_agent, 0) + msg_tokens
+                    for out in t_outs:
+                        if isinstance(out, dict):
+                            agent_input_tokens[matched_agent] = agent_input_tokens.get(matched_agent, 0) + estimate_tokens(out.get("content", ""))
+                elif role == "ai":
+                    agent_output_tokens[matched_agent] = agent_output_tokens.get(matched_agent, 0) + msg_tokens
                 
                 if role == "ai" and content:
                     mentions = agent_view.agent_manager.get_mentions(content)
@@ -1014,48 +1062,118 @@ def get_welcome_banner(agent_view) -> str:
                             if m != matched_agent:
                                 agent_collabs[matched_agent].add(m)
 
-    if agent_tokens:
-        best_agent = max(agent_tokens, key=agent_tokens.get)
-        tokens_processed = agent_tokens[best_agent]
+    # 3. Scan research directory for deep research inputs/outputs
+    research_input_tokens = 0
+    research_output_tokens = 0
+    try:
+        workspace_dir = agent_view.query_one("#dir_tree").path if agent_view else os.getcwd()
+        research_dir = os.path.join(workspace_dir, "research")
+        if os.path.exists(research_dir):
+            for root, dirs, files in os.walk(research_dir):
+                # Count successful fetches in research_status.log
+                log_path = os.path.join(root, "research_status.log")
+                if os.path.exists(log_path):
+                    try:
+                        with open(log_path, "r", encoding="utf-8", errors="ignore") as lf:
+                            for line in lf:
+                                if "[FETCH]" in line:
+                                    # Each successful fetch averages around 6,000 tokens of input webpage content
+                                    research_input_tokens += 6000
+                    except Exception:
+                        pass
+                
+                # Count tokens of generated markdown annexures/reports
+                for file in files:
+                    if file.endswith(".md") and file != "research_status.log":
+                        file_path = os.path.join(root, file)
+                        try:
+                            with open(file_path, "r", encoding="utf-8", errors="ignore") as mf:
+                                md_content = mf.read()
+                                research_output_tokens += estimate_tokens(md_content)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
+    # Calculate best agent
+    agent_total_tokens = {}
+    for agent in set(list(agent_input_tokens.keys()) + list(agent_output_tokens.keys())):
+        agent_total_tokens[agent] = agent_input_tokens.get(agent, 0) + agent_output_tokens.get(agent, 0)
+
+    if agent_total_tokens:
+        best_agent = max(agent_total_tokens, key=agent_total_tokens.get)
+        inp_tokens = agent_input_tokens.get(best_agent, 0) + research_input_tokens
+        out_tokens = agent_output_tokens.get(best_agent, 0) + research_output_tokens
         collabs = list(agent_collabs.get(best_agent, []))
-        collaborations = ", ".join(collabs) if collabs else "None"
     else:
         best_agent = agent_view.active_agent.name if getattr(agent_view, "active_agent", None) else "Rita"
-        tokens_processed = 0
-        collaborations = "None"
+        inp_tokens = research_input_tokens
+        out_tokens = research_output_tokens
+        collabs = []
         
     total_convs = len(total_conversations_all_time)
-    tools_called = tools_called_target_month
 
-    width = 62
-    content_width = width - 4 # 58
+    # Retrieve specific agent colors
+    def get_agent_color(name: str) -> str:
+        agent = agent_view.agent_manager.get_agent(name)
+        return agent.color if agent else "#00FFFF"
 
-    def make_row(text: str, align: str = "left") -> str:
-        space_len = content_width - len(text)
+    best_agent_color = get_agent_color(best_agent)
+    
+    colored_collabs = []
+    for c in collabs:
+        c_color = get_agent_color(c)
+        colored_collabs.append(f"[bold {c_color}]{c}[/]")
+    collaborations = ", ".join(colored_collabs) if colored_collabs else "None"
+
+    # Fetch skills count for the best agent
+    safe_name = best_agent.replace(" ", "_")
+    skills_dir = get_storage_path("agents", "skills", safe_name)
+    passive_count = 0
+    active_count = 0
+    if os.path.exists(skills_dir):
+        try:
+            passive_count = sum(1 for f in os.listdir(skills_dir) if f.endswith(".md"))
+            active_count = sum(1 for f in os.listdir(skills_dir) if f.endswith(".json"))
+        except Exception:
+            pass
+
+    # Dynamic metrics calculations for tool call success rates
+    total_tools_run = sum(agent_total_tools.values())
+    successful_tools_run = sum(agent_successful_tools.values())
+    
+    t_pct = int((successful_tools_run / total_tools_run) * 100) if total_tools_run > 0 else 0
+
+    # Width configuration to perfectly align columns
+    # Outer width is 70 characters
+    def make_row(text: str) -> str:
+        space_len = 66 - len(text)
+        left_space = space_len // 2
+        right_space = space_len - left_space
+        return f"│ {' ' * left_space}{text}{' ' * right_space} │"
+
+    def make_line(desc: str, value: str) -> str:
+        import re
+        visible_value = re.sub(r'\[/?.*?\]', '', value)
+        space_len = 40 - len(visible_value)
         if space_len < 0:
-            text = text[:content_width - 3] + "..."
             space_len = 0
-        if align == "center":
-            left_space = space_len // 2
-            right_space = space_len - left_space
-            return f"│ {' ' * left_space}{text}{' ' * right_space} │"
-        else:
-            return f"│ {text}{' ' * space_len} │"
+        return f"│  {desc:<21} │ {value}{' ' * space_len}  │"
 
     lines = [
-        "╭" + "─" * (width - 2) + "╮",
-        make_row("Federate.AI", align="center"),
-        make_row("", align="center"),
-        make_row(f"  Agent of the Month: {best_agent} ({used_month_name})"),
-        make_row(f"  Tokens Processed: {tokens_processed:,}"),
-        make_row(f"  Total Conversations: {total_convs:,}"),
-        make_row(f"  Tools Called: {tools_called:,}"),
-        make_row(f"  Collaborated with: {collaborations}"),
-        "╰" + "─" * (width - 2) + "╯"
+        "╭" + "─" * 68 + "╮",
+        make_row("Federate.AI"),
+        "├" + "─" * 68 + "┤",
+        make_line("Agent of the Month", f"[bold {best_agent_color}]{best_agent}[/] ({used_month_name})"),
+        make_line("Processed Tokens", f"[green]{inp_tokens:,}[/] / [blue]{out_tokens:,}[/]"),
+        make_line("Total Conversations", f"{total_convs:,}"),
+        make_line("Tool Calls", f"{successful_tools_run:,} / {total_tools_run:,} ({t_pct}%)"),
+        make_line("Skills", f"[blue]{passive_count}[/] / [red]{active_count}[/]"),
+        make_line("Collaborators", collaborations),
+        "╰" + "─" * 68 + "╯"
     ]
 
-    
-    colors = ["#f2a813", "#ec9624", "#e68435", "#e07246", "#da6057", "#d44e68", "#ce3c79", "#c82a8a", "#c2189b"]
+    colors = ["#f2a813", "#ec9624", "#ec9624", "#e68435", "#e07246", "#da6057", "#d44e68", "#ce3c79", "#c82a8a", "#c2189b"]
     colored_lines = []
     for line, color in zip(lines, colors):
         colored_lines.append(f"[{color}]{line}[/]")
@@ -1097,7 +1215,7 @@ class AIAgentView(Vertical):
     
     BINDINGS =[
         Binding("f2", "open_chat_manager", "Sessions"),
-        Binding("ctrl+k", "clear_all_contexts", "New Chat"),
+        Binding("ctrl+k", "clear_all_contexts", "New Chat", priority=True),
         Binding("f4", "open_active_config", "Edit Agent"),
         Binding("f5", "switch_agent", "Switch Agent"),
         Binding("ctrl+t", "cycle_arm_mode", "Cycle Mode"),
@@ -1666,11 +1784,14 @@ class AIAgentView(Vertical):
                 tools.append(make_wrapped_tool(tool_obj))
                 
         else: # PLAN (SAFE) Mode
-            # Safe Mode: Only high-privilege tools explicitly allowed in the agent's config are present,
-            # but they must also go through the confirmation modal before running.
-            for tname in agent_config.enabled_tools:
-                if tname in high_priv_map:
-                    tools.append(make_wrapped_tool(high_priv_map[tname]))
+                # Safe Mode: Only high-privilege tools explicitly allowed in the agent's config are present,
+                # but they must also go through the confirmation modal before running.
+                for tname in agent_config.enabled_tools:
+                    if tname == "visual_computer_operation":
+                        for ct in ["take_screenshot", "click_at_current_location", "move_cursor_absolute", "move_cursor_relative", "send_scroll", "inject_keyboard_input"]:
+                            tools.append(make_wrapped_tool(high_priv_map[ct]))
+                    elif tname in high_priv_map:
+                        tools.append(make_wrapped_tool(high_priv_map[tname]))
         
         executor = create_react_agent(llm, tools, checkpointer=shared_memory)
         self.agent_executors[agent_config.name] = executor
@@ -2124,8 +2245,14 @@ class AIAgentView(Vertical):
                                     # Print incoming tool results
                                     elif node_name == "tools":
                                         for msg in messages:
-                                            tool_outputs.append({"name": getattr(msg, 'name', 'tool'), "content": msg.content})
-                                            summary = (str(msg.content) + '...') if len(str(msg.content)) > 200 else str(msg.content)
+                                            tool_name = getattr(msg, 'name', 'tool')
+                                            tool_outputs.append({"name": tool_name, "content": msg.content})
+                                            
+                                            # Intercept and hide raw search results from the UI to comply with DuckDuckGo terms
+                                            if tool_name in ["search_web", "SearchWeb"]:
+                                                summary = "[Search results successfully parsed and delivered to active agent context]"
+                                            else:
+                                                summary = (str(msg.content) + '...') if len(str(msg.content)) > 200 else str(msg.content)
                                             
                                             # Build the boxed widget
                                             box_content = f"[bold]Tool Result ({agent.name}):[/bold]\n{escape(summary)}"
