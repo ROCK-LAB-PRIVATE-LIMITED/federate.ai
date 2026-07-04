@@ -115,6 +115,24 @@ from audio_handler import TTSManager, STTManager, AudioConfigModal
 from telegram_handler import TelegramManager
 from orchestration import AgentManager, SessionManager, AgentConfig, HistoryMessage, ScheduleManager
 
+def get_session_name_map() -> dict:
+    path = os.path.join(toolbox.FEDERATE_DIR, "session_names.json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_session_name_map(m: dict):
+    path = os.path.join(toolbox.FEDERATE_DIR, "session_names.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(m, f, indent=4)
+    except Exception:
+        pass
+
 # --- MODAL SCREENS ---
 class ToolConfirmationModal(ModalScreen[bool]):
     DEFAULT_CSS = """
@@ -219,12 +237,24 @@ class ChatLoadModal(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         files = sorted(glob.glob(get_storage_path("sessions", "*.json")), key=os.path.getmtime, reverse=True)
         self.file_map = {f"c_{i}": f for i, f in enumerate(files)}
+        name_map = get_session_name_map()
         with Vertical(id="chat_load_dialog"):
             yield Label("📂 Load Session History", classes="pane_title")
             with VerticalScroll(id="chat_list"):
                 if not files: yield Label("  No sessions found.")
                 for btn_id, path in self.file_map.items():
-                    yield Button(f"📜 {os.path.basename(path)}", id=btn_id)
+                    base = os.path.basename(path).replace(".json", "")
+                    parts = base.split("_")
+                    session_id = f"{parts[0]}_{parts[1]}" if len(parts) >= 2 else ""
+                    agent_name = " ".join(parts[2:]) if len(parts) >= 3 else ""
+                    
+                    friendly_name = name_map.get(session_id)
+                    if friendly_name:
+                        btn_label = f"📜 {friendly_name} ({agent_name})"
+                    else:
+                        btn_label = f"📜 {base}"
+                        
+                    yield Button(btn_label, id=btn_id)
             yield Button("Cancel", id="cancel", variant="error")
 
     @on(Button.Pressed)
@@ -1773,7 +1803,19 @@ class AIAgentView(Vertical):
                 confirmed = self.confirm_tool_execution(t_obj.name, kwargs, agent_name=agent_name)
                 if not confirmed:
                     return f"Error: Tool execution of '{t_obj.name}' was rejected by the user."
-                return t_obj.func(*args, **kwargs)
+                res = t_obj.func(*args, **kwargs)
+                if isinstance(res, str) and "[ImageBase64:" in res:
+                    parts = re.split(r'\[ImageBase64:\s*(data:image/[a-zA-Z]+;base64,[^\]]+)\]', res)
+                    if len(parts) > 1:
+                        content_list = []
+                        for i, part in enumerate(parts):
+                            if i % 2 == 0:
+                                if part.strip(): content_list.append({"type": "text", "text": part.strip()})
+                            else:
+                                url = part.strip().replace("\n", "").replace("\r", "").replace(" ", "")
+                                content_list.append({"type": "image_url", "image_url": {"url": url}})
+                        return content_list
+                return res
             return StructuredTool(
                 name=t_obj.name,
                 description=t_obj.description,
@@ -2253,13 +2295,24 @@ class AIAgentView(Vertical):
                                     elif node_name == "tools":
                                         for msg in messages:
                                             tool_name = getattr(msg, 'name', 'tool')
-                                            tool_outputs.append({"name": tool_name, "content": msg.content})
+                                            
+                                            content_to_save = msg.content
+                                            if isinstance(msg.content, list):
+                                                reconstructed = ""
+                                                for block in msg.content:
+                                                    if block.get("type") == "text":
+                                                        reconstructed += block.get("text", "")
+                                                    elif block.get("type") == "image_url":
+                                                        reconstructed += "\n[ImageBase64: <base64_data_omitted>]\n"
+                                                content_to_save = reconstructed
+                                                
+                                            tool_outputs.append({"name": tool_name, "content": content_to_save})
                                             
                                             # Intercept and hide raw search results from the UI to comply with DuckDuckGo terms
                                             if tool_name in ["search_web", "SearchWeb"]:
                                                 summary = "[Search results successfully parsed and delivered to active agent context]"
                                             else:
-                                                summary = (str(msg.content) + '...') if len(str(msg.content)) > 200 else str(msg.content)
+                                                summary = (str(content_to_save) + '...') if len(str(content_to_save)) > 200 else str(content_to_save)
                                             
                                             # Build the boxed widget
                                             box_content = f"[bold]Tool Result ({agent.name}):[/bold]\n{escape(summary)}"
@@ -2287,6 +2340,9 @@ class AIAgentView(Vertical):
                     # 1. Save to session manager so others can see it
                     self.session_manager.broadcast_message(agent.name, ai_response, is_ai=True, tool_outputs=tool_outputs, tool_calls=tool_calls)
                     self.app.call_from_thread(self.update_tokens)
+                    
+                    # Silent Background Session Naming
+                    self.trigger_background_naming(prompt, ai_response)
                     
                     # 2. Check for new mentions in AI response and add to queue
                     new_mentions = self.agent_manager.get_mentions(ai_response)
@@ -2560,7 +2616,45 @@ class AIAgentView(Vertical):
                 self.log_to_ui(f"[bold red]Telegram Input Error:[/bold red] {e}")
                 
         self.app.call_from_thread(_process)
-    
+
+    def trigger_background_naming(self, user_prompt: str, agent_response: str):
+        session_id = self.session_manager.current_session_id
+        name_map = get_session_name_map()
+        if session_id in name_map:
+            return
+            
+        agent = self.active_agent
+        api_key = agent.get_api_key()
+        if not api_key:
+            return
+            
+        try:
+            from langchain_openai import ChatOpenAI
+            from langchain_core.messages import SystemMessage
+            llm = ChatOpenAI(
+                model=agent.model,
+                api_key=api_key,
+                base_url=agent.base_url,
+                temperature=0,
+                max_retries=1
+            )
+            naming_prompt = (
+                "Based on the following first user query and agent response of a session, "
+                "generate a short, descriptive name (3-5 words max, no quotes, no file extensions, "
+                "plain text) for this session.\n\n"
+                f"User: {user_prompt[:200]}\n"
+                f"Agent: {agent_response[:200]}"
+            )
+            res = llm.invoke([HumanMessage(content=naming_prompt)])
+            name = res.content.strip().strip('"').strip("'")
+            if name:
+                name_map[session_id] = name
+                save_session_name_map(name_map)
+                self.log_to_ui(f"[bold green]Session Named: {name}[/]")
+        except Exception as e:
+            self.log_to_ui(f"[bold red]Session Naming Failed: {e}[/]")
+            pass
+
     def handle_stt_input(self, text: str, action: str = "append"):
         """Handles pause-appends, auto-submits, and hotword deletions in the UI."""
         def _process():
