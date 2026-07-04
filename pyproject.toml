@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "federate"
-version = "0.9.12"
+version = "0.9.13"
 description = "A cross-platform terminal based p2p agent orchestration harness and universal automation system"
 readme = "README.md"
 license = {text = "Apache Software License"}
@@ -35,8 +35,8 @@ dependencies = [
     "langgraph-checkpoint==4.0.1",
     "langgraph-checkpoint-sqlite==3.0.3",
     "langgraph-prebuilt==1.0.8",
-    "langgraph-sdk==0.3.12"
-    "langsmith==0.7.22"
+    "langgraph-sdk==0.3.12",
+    "langsmith==0.7.22",
     "rich==15.0.0",
     "markdownify==1.2.2",
     "markdown==3.10.2",
