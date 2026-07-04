@@ -369,6 +369,17 @@ class SessionManager:
                             tool_content = f'<AGENT_INTERCOM_TOOL_RESPONSE agent="{src_name}" tool="{output.get("name")}">\n{output.get("content")}\n</AGENT_INTERCOM_TOOL_RESPONSE>'
                             dst_history.append(HistoryMessage(role="human", content=tool_content))
             elif msg.role == "human":
+                # --- MITIGATION: Skip importing intercom messages sent by the destination agent themselves ---
+                import re
+                match_intercom = re.match(r'<AGENT_INTERCOM sender="([^"]+)">', msg.content)
+                if match_intercom and match_intercom.group(1) == dst_name:
+                    continue
+                    
+                match_tool = re.match(r'<AGENT_INTERCOM_TOOL_RESPONSE agent="([^"]+)"', msg.content)
+                if match_tool and match_tool.group(1) == dst_name:
+                    continue
+                # -----------------------------------------------------------------------------------------
+    
                 # Only sync raw human messages if they aren't already there
                 if msg.content not in existing_contents:
                     dst_history.append(msg)
