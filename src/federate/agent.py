@@ -1645,14 +1645,17 @@ class AIAgentView(Vertical):
             
             # If msg is markup like "[bold blue]User:[/bold blue]", extract label to try and find agent color
             if isinstance(msg, str) and not is_markdown:
-                match = re.search(r'\[bold ([^\]]+)\]([^:]+):\[/bold', msg)
+                # Regex matches both opening style tags and optional closing style suffixes
+                match = re.search(r'\[bold ([^\]]+)\]([^:]+):\[/bold(?:\s+[^\]]+)?\]', msg)
                 if match:
                     label_text = match.group(2).strip()
                     # Try to find agent by name
                     agent = self.agent_manager.get_agent(label_text)
                     if agent:
-                        # Override the hardcoded color with the agent's actual color
-                        msg = msg.replace(f"[bold {match.group(1)}]", f"[bold {agent.color}]")
+                        # Override both opening and closing tag colors to prevent mismatches
+                        old_color = match.group(1)
+                        msg = msg.replace(f"[bold {old_color}]", f"[bold {agent.color}]")
+                        msg = msg.replace(f"[/bold {old_color}]", f"[/bold {agent.color}]")
 
             if isinstance(msg, str):
                 if is_markdown:
