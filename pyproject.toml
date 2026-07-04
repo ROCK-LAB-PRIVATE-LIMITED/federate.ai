@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "federate"
-version = "0.9.9"
+version = "0.9.10"
 description = "A cross-platform terminal based p2p agent orchestration harness and universal automation system"
 readme = "README.md"
 license = {text = "Apache Software License"}
@@ -35,7 +35,7 @@ dependencies = [
     "rich==15.0.0",
     "markdownify==1.2.2",
     "markdown==3.10.2",
-    "tiktoken==0.13.0",
+    "tiktoken",
     "beautifulsoup4==4.15.0",
     "fake-useragent==2.2.0",
     "numpy==2.4.6",
