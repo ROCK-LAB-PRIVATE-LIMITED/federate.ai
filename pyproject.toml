@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "federate"
-version = "0.9.10"
+version = "0.9.11"
 description = "A cross-platform terminal based p2p agent orchestration harness and universal automation system"
 readme = "README.md"
 license = {text = "Apache Software License"}
@@ -40,7 +40,7 @@ dependencies = [
     "fake-useragent==2.2.0",
     "numpy==2.4.6",
     "pydantic==2.13.4",
-    "langgraph-checkpoint-sqlite==2.0.7",
+    "langgraph-checkpoint-sqlite",
     "keyring",
     "python-dotenv",
     "pylatexenc==2.10",  # Compulsory LaTeX parser for mathematical unicode rendering
