@@ -29,6 +29,18 @@ try:
 
     def _patched_convert_message_to_dict(message, *args, **kwargs):
         msg_dict = _orig_convert_message_to_dict(message, *args, **kwargs)
+        
+        # 1. Sanitize Tool Response Messages (function_response name cannot be empty)
+        if msg_dict.get("role") == "tool" and not msg_dict.get("name"):
+            msg_dict["name"] = "unknown_tool"
+            
+        # 2. Sanitize Assistant Tool Call Messages (function_call name cannot be empty)
+        elif msg_dict.get("role") == "assistant" and msg_dict.get("tool_calls"):
+            for tc in msg_dict["tool_calls"]:
+                func = tc.get("function")
+                if func and not func.get("name"):
+                    func["name"] = "unknown_tool"
+
         if isinstance(message, AIMessage) or msg_dict.get("role") == "assistant":
             tool_calls = msg_dict.get("tool_calls")
             if tool_calls:
@@ -44,7 +56,6 @@ try:
                 
                 for tc in tool_calls:
                     tc_id = tc.get("id")
-                    # Fallback to satisfy the validation schema if standard signatures are lost
                     sig = sig_map.get(tc_id) or "skip_thought_signature_validator"
                     tc["extra_content"] = {
                         "google": {
@@ -106,7 +117,7 @@ from toolbox import (
     send_scroll,
     inject_keyboard_input
 )
-from toolbox import shared_memory, update_core_memory, save_skill, read_skill, distill_journey, mark_quagmire, delete_passive_skill, list_skills
+from toolbox import shared_memory, update_core_memory, save_skill, read_skill, distill_journey, mark_quagmire, delete_passive_skill, list_skills, is_keyring_locked, unlock_keyring, get_locked_keyring
 import time
 import toolbox
 from subagents import dispatch_subagent
@@ -234,10 +245,22 @@ class ChatLoadModal(ModalScreen[str]):
     #chat_list { margin: 1 0; height: 1fr; border: round $primary; background: $boost; }
     #chat_list Button { width: 100%; margin-bottom: 0; border: none; content-align: left middle; }
     """
+    def on_mount(self) -> None:
+        if self.query("#chat_list Button"):
+            self.query("#chat_list Button").first().focus()
+        else:
+            self.query_one("#cancel").focus()
+
     def compose(self) -> ComposeResult:
         files = sorted(glob.glob(get_storage_path("sessions", "*.json")), key=os.path.getmtime, reverse=True)
-        self.file_map = {f"c_{i}": f for i, f in enumerate(files)}
         name_map = get_session_name_map()
+        files = [
+            f for f in files 
+            if (parts := os.path.basename(f).replace(".json", "").split("_")) 
+            and len(parts) >= 2 
+            and f"{parts[0]}_{parts[1]}" in name_map
+        ]
+        self.file_map = {f"c_{i}": f for i, f in enumerate(files)}
         with Vertical(id="chat_load_dialog"):
             yield Label("📂 Load Session History", classes="pane_title")
             with VerticalScroll(id="chat_list"):
@@ -306,30 +329,369 @@ class ChatManagerModal(ModalScreen[str]):
     def handle_click(self, event: Button.Pressed): self.dismiss(event.button.id)
 
 
-class KeyringUnlockModal(ModalScreen[str]):
+class KeyringUnlockModal(ModalScreen[tuple]):
     DEFAULT_CSS = """
     KeyringUnlockModal { align: center middle; background: $background 60%; }
-    #unlock_dialog { width: 50; height: auto; border: thick $primary; background: $surface; padding: 1 2; }
+    #unlock_dialog { width: 70; height: auto; border: thick $primary; background: $surface; padding: 1 2; }
     #unlock_dialog Input { margin-bottom: 1; }
     #unlock_dialog .pane_title { background: $primary; color: $text; padding: 0 1; margin-bottom: 1; text-style: bold; width: 100%; text-align: center; }
+    .warning_text { color: $error; margin-bottom: 1; text-style: italic; text-wrap: wrap; height: auto; width: 100%; }
+    .modal_buttons { layout: horizontal; height: auto; margin-top: 1; padding: 0 1; }
+    .modal_buttons Button { margin-right: 1; }
     """
     def compose(self) -> ComposeResult:
         with Vertical(id="unlock_dialog"):
             yield Label("🔐 Keyring Locked", classes="pane_title")
-            yield Label("Please enter your Master Password to unlock the encrypted keyring:")
+            yield Label("Please enter your Master Password:")
             yield Input(placeholder="Master Password", id="master_pwd", password=True)
-            with Horizontal():
-                yield Button("Unlock", id="unlock_btn", variant="primary")
+            yield Label("⚠️ Resetting or setting a new password will permanently delete any previously saved keys in this keyring.", classes="warning_text")
+            with Horizontal(classes="modal_buttons"):
+                yield Button("Unlock", id="unlock_btn", variant="success")
+                yield Button("Set New / Reset", id="reset_btn", variant="warning")
                 yield Button("Cancel", id="cancel_btn", variant="error")
 
     @on(Button.Pressed, "#unlock_btn")
     def unlock(self):
-        self.dismiss(self.query_one("#master_pwd").value)
+        pwd = self.query_one("#master_pwd").value
+        self.dismiss(("unlock", pwd))
+
+    @on(Button.Pressed, "#reset_btn")
+    def reset(self):
+        pwd = self.query_one("#master_pwd").value
+        self.dismiss(("reset", pwd))
 
     @on(Button.Pressed, "#cancel_btn")
     def cancel(self):
         self.dismiss(None)
 
+class GlobalSettingsModal(ModalScreen[str]):
+    DEFAULT_CSS = """
+    GlobalSettingsModal { align: center middle; background: $background 60%; }
+    #global_config_dialog { width: 75; height: 90%; border: round $primary; background: $surface; padding: 0; }
+    #global_scroll { padding: 1 2; }
+    .section_label { background: $primary; color: $text; padding: 0 1; margin-top: 1; text-style: bold; width: 100%; }
+    .field_container { margin-top: 1; height: auto; width: 100%; }
+    .field_label { color: $text; text-style: bold; margin-bottom: 0; width: 100%; }
+    .field_help { color: $text-muted; text-style: italic; margin-bottom: 0; text-wrap: wrap; height: auto; width: 100%; }
+    Input { width: 100%; margin-top: 0; margin-bottom: 1; border: round $accent; }
+    #global_actions { margin-top: 1; align: right middle; height: auto; border-top: solid $primary; padding: 1 2; }
+    #global_actions Button { margin-left: 1; }
+    """
+    
+    def compose(self) -> ComposeResult:
+        with Vertical(id="global_config_dialog"):
+            yield Label("⚙️ Global Harness Settings", classes="pane_title")
+            
+            with VerticalScroll(id="global_scroll"):
+                yield Label("Search & Scraping Parameters", classes="section_label")
+                
+                with Vertical(classes="field_container"):
+                    yield Label("Search Pacing Delay (Seconds)", classes="field_label")
+                    yield Label("Baseline delay in seconds between consecutive web searches to protect your IP from rate limits.", classes="field_help")
+                    yield Input(id="search_pacing_delay", placeholder="e.g. 65.0")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Max Web Search Results", classes="field_label")
+                    yield Label("The maximum number of search result snippets requested per query (typically 5 to 20).", classes="field_help")
+                    yield Input(id="max_search_results", placeholder="e.g. 10")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Scraper Max Size Limit (Bytes)", classes="field_label")
+                    yield Label("Maximum download limit for a scraped web page to prevent fetching massive documents.", classes="field_help")
+                    yield Input(id="scraper_max_bytes", placeholder="e.g. 1000000")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Scraper Timeout (Seconds)", classes="field_label")
+                    yield Label("Maximum download time in seconds allowed for fetching/scraping web pages.", classes="field_help")
+                    yield Input(id="scraper_timeout", placeholder="e.g. 120.0")
+
+                yield Label("API Connection & Error Recovery", classes="section_label")
+                
+                with Vertical(classes="field_container"):
+                    yield Label("Max Connection Retries", classes="field_label")
+                    yield Label("Maximum retry attempts for dropped, uncompleted, or rate-limited LLM API calls.", classes="field_help")
+                    yield Input(id="max_api_retries", placeholder="e.g. 20")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Dropped Connection Wait (Seconds)", classes="field_label")
+                    yield Label("Wait duration in seconds before retrying an LLM API call after a dropped connection.", classes="field_help")
+                    yield Input(id="api_retry_delay", placeholder="e.g. 15.0")
+
+                yield Label("Deep Research Orchestrator", classes="section_label")
+                
+                with Vertical(classes="field_container"):
+                    yield Label("Maximum Parallel Sub-agents", classes="field_label")
+                    yield Label("Number of concurrent sub-agents spawned to execute deep research modules (typically 1 to 10).", classes="field_help")
+                    yield Input(id="max_research_agents", placeholder="e.g. 4")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Research Context Token Limit", classes="field_label")
+                    yield Label("The target context token limit reached by gathered material before research stops.", classes="field_help")
+                    yield Input(id="research_context_tokens", placeholder="e.g. 28000")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Final Report Minimum Token Length", classes="field_label")
+                    yield Label("Minimum tokens required for the synthesized report to prevent automatic rewrite retries.", classes="field_help")
+                    yield Input(id="research_min_length", placeholder="e.g. 5000")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Context Shrink Max Attempts", classes="field_label")
+                    yield Label("Maximum context truncation/reduction loops allowed to salvage context overflow situations.", classes="field_help")
+                    yield Input(id="max_shrink_attempts", placeholder="e.g. 15")
+
+                with Vertical(classes="field_container"):
+                    yield Label("Scraper Max Token Limit", classes="field_label")
+                    yield Label("The maximum number of tokens allowed per web page fetch before content is immediately truncated.", classes="field_help")
+                    yield Input(id="scraper_max_tokens", placeholder="e.g. 30000")
+
+                with Vertical(classes="field_container"):
+                    yield Label("API Quota Block Wait (Seconds)", classes="field_label")
+                    yield Label("Cooldown duration in seconds to pause execution when a 429 quota exhaustion error is encountered.", classes="field_help")
+                    yield Input(id="quota_retry_delay", placeholder="e.g. 120.0")
+
+                yield Label("Parsing & Utilities", classes="section_label")
+                
+                with Vertical(classes="field_container"):
+                    yield Label("PDF Rendering DPI", classes="field_label")
+                    yield Label("DPI resolution used when converting PDF document pages to images for vision parsing.", classes="field_help")
+                    yield Input(id="pdf_dpi", placeholder="e.g. 150")
+                    
+            with Horizontal(id="global_actions"):
+                yield Button("Save Changes", id="save_global_btn", variant="success")
+                yield Button("Cancel", id="cancel_global_btn", variant="error")
+
+    def on_mount(self):
+        from toolbox import load_global_settings
+        config = load_global_settings()
+        self.query_one("#search_pacing_delay", Input).value = str(config.get("search_pacing_delay", 65.0))
+        self.query_one("#max_search_results", Input).value = str(config.get("max_search_results", 10))
+        self.query_one("#scraper_max_bytes", Input).value = str(config.get("scraper_max_bytes", 1000000))
+        self.query_one("#scraper_timeout", Input).value = str(config.get("scraper_timeout", 120.0))
+        self.query_one("#scraper_max_tokens", Input).value = str(config.get("scraper_max_tokens", 30000))
+        self.query_one("#max_api_retries", Input).value = str(config.get("max_api_retries", 20))
+        self.query_one("#api_retry_delay", Input).value = str(config.get("api_retry_delay", 15.0))
+        self.query_one("#quota_retry_delay", Input).value = str(config.get("quota_retry_delay", 120.0))
+        self.query_one("#max_research_agents", Input).value = str(config.get("max_research_agents", 4))
+        self.query_one("#research_context_tokens", Input).value = str(config.get("research_context_tokens", 28000))
+        self.query_one("#research_min_length", Input).value = str(config.get("research_min_length", 5000))
+        self.query_one("#max_shrink_attempts", Input).value = str(config.get("max_shrink_attempts", 15))
+        self.query_one("#pdf_dpi", Input).value = str(config.get("pdf_dpi", 150))
+
+    @on(Button.Pressed, "#save_global_btn")
+    def save_btn(self):
+        from toolbox import save_global_settings
+        try: pacing = float(self.query_one("#search_pacing_delay", Input).value.strip())
+        except ValueError: pacing = 65.0
+        
+        try: max_results = int(self.query_one("#max_search_results", Input).value.strip())
+        except ValueError: max_results = 10
+        
+        try: max_bytes = int(self.query_one("#scraper_max_bytes", Input).value.strip())
+        except ValueError: max_bytes = 1000000
+        
+        try: timeout = float(self.query_one("#scraper_timeout", Input).value.strip())
+        except ValueError: timeout = 120.0
+        
+        try: scraper_tokens = int(self.query_one("#scraper_max_tokens", Input).value.strip())
+        except ValueError: scraper_tokens = 30000
+        
+        try: max_retries = int(self.query_one("#max_api_retries", Input).value.strip())
+        except ValueError: max_retries = 20
+        
+        try: retry_delay = float(self.query_one("#api_retry_delay", Input).value.strip())
+        except ValueError: retry_delay = 15.0
+        
+        try: quota_delay = float(self.query_one("#quota_retry_delay", Input).value.strip())
+        except ValueError: quota_delay = 120.0
+            
+        try: max_agents = int(self.query_one("#max_research_agents", Input).value.strip())
+        except ValueError: max_agents = 4
+            
+        try: tokens = int(self.query_one("#research_context_tokens", Input).value.strip())
+        except ValueError: tokens = 28000
+            
+        try: min_len = int(self.query_one("#research_min_length", Input).value.strip())
+        except ValueError: min_len = 5000
+        
+        try: max_shrink = int(self.query_one("#max_shrink_attempts", Input).value.strip())
+        except ValueError: max_shrink = 15
+        
+        try: pdf_dpi_val = int(self.query_one("#pdf_dpi", Input).value.strip())
+        except ValueError: pdf_dpi_val = 150
+            
+        config = {
+            "search_pacing_delay": pacing,
+            "max_search_results": max_results,
+            "scraper_max_bytes": max_bytes,
+            "scraper_timeout": timeout,
+            "scraper_max_tokens": scraper_tokens,
+            "max_api_retries": max_retries,
+            "api_retry_delay": retry_delay,
+            "quota_retry_delay": quota_delay,
+            "max_research_agents": max_agents,
+            "research_context_tokens": tokens,
+            "research_min_length": min_len,
+            "max_shrink_attempts": max_shrink,
+            "pdf_dpi": pdf_dpi_val
+        }
+        save_global_settings(config)
+        
+        # Dynamically sync the baseline variables in toolbox.py and the active view
+        import toolbox
+        toolbox._DYNAMIC_PACING_DELAY = pacing
+        
+        try:
+            agent_view = self.app.query_one("AIAgentView")
+            agent_view.pdf_dpi = pdf_dpi_val
+        except Exception:
+            pass
+            
+        self.dismiss("update")
+
+    @on(Button.Pressed, "#cancel_global_btn")
+    def cancel_btn(self):
+        self.dismiss("cancel")
+
+
+
+VOICE_OPTIONS = [
+    # American English
+    ("af_heart (US Female ❤️)", "af_heart"),
+    ("af_alloy (US Female)", "af_alloy"),
+    ("af_aoede (US Female)", "af_aoede"),
+    ("af_bella (US Female 🔥)", "af_bella"),
+    ("af_jessica (US Female)", "af_jessica"),
+    ("af_kore (US Female)", "af_kore"),
+    ("af_nicole (US Female 🎧)", "af_nicole"),
+    ("af_nova (US Female)", "af_nova"),
+    ("af_river (US Female)", "af_river"),
+    ("af_sarah (US Female)", "af_sarah"),
+    ("af_sky (US Female 🤏)", "af_sky"),
+    ("am_adam (US Male)", "am_adam"),
+    ("am_echo (US Male)", "am_echo"),
+    ("am_eric (US Male)", "am_eric"),
+    ("am_fenrir (US Male)", "am_fenrir"),
+    ("am_liam (US Male)", "am_liam"),
+    ("am_michael (US Male)", "am_michael"),
+    ("am_onyx (US Male)", "am_onyx"),
+    ("am_puck (US Male)", "am_puck"),
+    ("am_santa (US Male 🤏)", "am_santa"),
+    # British English
+    ("bf_alice (UK Female)", "bf_alice"),
+    ("bf_emma (UK Female)", "bf_emma"),
+    ("bf_isabella (UK Female)", "bf_isabella"),
+    ("bf_lily (UK Female)", "bf_lily"),
+    ("bm_daniel (UK Male)", "bm_daniel"),
+    ("bm_fable (UK Male)", "bm_fable"),
+    ("bm_george (UK Male)", "bm_george"),
+    ("bm_lewis (UK Male)", "bm_lewis"),
+    # Japanese
+    ("jf_alpha (JP Female)", "jf_alpha"),
+    ("jf_gongitsune (JP Female)", "jf_gongitsune"),
+    ("jf_nezumi (JP Female 🤏)", "jf_nezumi"),
+    ("jf_tebukuro (JP Female)", "jf_tebukuro"),
+    ("jm_kumo (JP Male 🤏)", "jm_kumo"),
+    # Mandarin Chinese
+    ("zf_xiaobei (ZH Female)", "zf_xiaobei"),
+    ("zf_xiaoni (ZH Female)", "zf_xiaoni"),
+    ("zf_xiaoxiao (ZH Female)", "zf_xiaoxiao"),
+    ("zf_xiaoyi (ZH Female)", "zf_xiaoyi"),
+    ("zm_yunjian (ZH Male)", "zm_yunjian"),
+    ("zm_yunxi (ZH Male)", "zm_yunxi"),
+    ("zm_yunxia (ZH Male)", "zm_yunxia"),
+    ("zm_yunyang (ZH Male)", "zm_yunyang"),
+    # Spanish
+    ("ef_dora (ES Female)", "ef_dora"),
+    ("em_alex (ES Male)", "em_alex"),
+    ("em_santa (ES Male)", "em_santa"),
+    # French
+    ("ff_siwis (FR Female)", "ff_siwis"),
+    # Hindi
+    ("hf_alpha (HI Female)", "hf_alpha"),
+    ("hf_beta (HI Female)", "hf_beta"),
+    ("hm_omega (HI Male)", "hm_omega"),
+    ("hm_psi (HI Male)", "hm_psi"),
+    # Italian
+    ("if_sara (IT Female)", "if_sara"),
+    ("im_nicola (IT Male)", "im_nicola"),
+    # Brazilian Portuguese
+    ("pf_dora (PT Female)", "pf_dora"),
+    ("pm_alex (PT Male)", "pm_alex"),
+    ("pm_santa (PT Male)", "pm_santa"),
+]
+
+BASE_URL_PRESETS = [
+    ("OpenRouter", "https://openrouter.ai/api/v1"),
+    ("OpenAI", "https://api.openai.com/v1/"),
+    ("Anthropic", "https://api.anthropic.com/v1/"),
+    ("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+    ("Custom", "custom")
+]
+
+class OnboardingModal(ModalScreen[dict]):
+    DEFAULT_CSS = """
+    OnboardingModal { align: center middle; background: $background 60%; }
+    #onboard_dialog { width: 75; max-height: 90vh; border: round $success; background: $surface; padding: 0 0; }
+    #onboard_scroll { padding: 1 2; }
+    .details_box { padding: 0 1; margin-bottom: 0; height: auto; background: $surface; }
+    .pane_title { background: $success; color: $text; text-style: bold; text-align: center; width: 100%; height: 3; content-align: center middle; }
+    .section_label { color: $success; text-style: bold; text-align: center; width: 100%; margin-top: 1; margin-bottom: 1; }
+    Input, Select, SelectCurrent { background: black !important; color: white !important; border: round $success; height: 3; margin-bottom: 1; }
+    Input:focus, Select:focus, SelectCurrent:focus { background: black !important; color: white !important; border: round $accent; }
+    #onboard_actions { height: 4; align: center middle; border-top: solid $primary; margin-top: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="onboard_dialog"):
+            yield Label("🚀 Welcome to Federate Multiagent Harness", classes="pane_title")
+            with VerticalScroll(id="onboard_scroll"):
+                with Vertical(classes="details_box"):
+                    yield Label("Please configure your first agent to get started:", classes="section_label")
+                    yield Label("Agent Name:")
+                    yield Input("Rita", id="onboard_name")
+                    yield Label("Agent Backstory:")
+                    yield Input("You are Rita, a general purpose senior developer.", id="onboard_backstory")
+                    yield Label("Model:")
+                    yield Input("gemini-3.1-flash-lite", id="onboard_model")
+                    yield Label("Base URL Preset:")
+                    yield Select(BASE_URL_PRESETS, value="https://generativelanguage.googleapis.com/v1beta/openai/", id="onboard_base_url_preset", allow_blank=False)
+                    yield Label("Base URL:")
+                    yield Input("https://generativelanguage.googleapis.com/v1beta/openai/", id="onboard_base_url")
+                    yield Label("API Key:")
+                    yield Input(placeholder="Enter your API Key...", id="onboard_api_key", password=True)
+            with Horizontal(id="onboard_actions"):
+                yield Button("Get Started", id="onboard_submit_btn", variant="success")
+
+    @on(Select.Changed, "#onboard_base_url_preset")
+    def on_preset_changed(self, event: Select.Changed):
+        if event.value != "custom" and event.value != Select.BLANK:
+            self.query_one("#onboard_base_url", Input).value = str(event.value)
+
+    @on(Input.Changed, "#onboard_base_url")
+    def on_base_url_changed(self, event: Input.Changed):
+        input_val = event.value.strip()
+        matched = "custom"
+        for label, val in BASE_URL_PRESETS:
+            if val == input_val:
+                matched = val
+                break
+        select_widget = self.query_one("#onboard_base_url_preset", Select)
+        if select_widget.value != matched:
+            select_widget.value = matched
+
+    @on(Button.Pressed, "#onboard_submit_btn")
+    def submit(self):
+        name = self.query_one("#onboard_name", Input).value.strip()
+        if not name:
+            self.notify("Agent name cannot be empty.", severity="error")
+            return
+        self.dismiss({
+            "name": name,
+            "backstory": self.query_one("#onboard_backstory", Input).value.strip(),
+            "model": self.query_one("#onboard_model", Input).value.strip(),
+            "base_url": self.query_one("#onboard_base_url", Input).value.strip(),
+            "api_key": self.query_one("#onboard_api_key", Input).value.strip(),
+        })
 
 class ConfigModal(ModalScreen[str]):
     DEFAULT_CSS = """
@@ -372,18 +734,35 @@ class ConfigModal(ModalScreen[str]):
                     yield Input(value=self.agent_config.backstory, id="ai_backstory")
                     yield Label("Model:")
                     yield Input(value=self.agent_config.model, id="ai_model")
+                    yield Label("Base URL Preset:")
+                    current_url = self.agent_config.base_url or "https://openrouter.ai/api/v1"
+                    matched_preset = "custom"
+                    for label, val in BASE_URL_PRESETS:
+                        if val == current_url:
+                            matched_preset = val
+                            break
+                    yield Select(BASE_URL_PRESETS, value=matched_preset, id="ai_base_url_preset", allow_blank=False)
+                    
                     yield Label("Base URL:")
-                    yield Input(value=self.agent_config.base_url, id="ai_base_url")
+                    yield Input(value=current_url, id="ai_base_url")
                     yield Label("API Key:")
                     yield Input(value=self.agent_config.get_api_key(), id="ai_api_key", password=True)
                     yield Label("Agent Color (Hex):")
                     yield Input(value=self.agent_config.color, id="ai_color")
                     yield Label("TTS Voice:") # <-- NEW
-                    yield Input(value=self.agent_config.tts_voice, id="ai_tts_voice", placeholder="e.g. af_sarah, am_adam") # <-- NEW
+                    
+                    # Prepare list options dynamically based on the current assigned voice
+                    current_voice = self.agent_config.tts_voice or "af_sarah"
+                    voice_options = VOICE_OPTIONS.copy()
+                    if not any(opt[1] == current_voice for opt in voice_options):
+                        voice_options.insert(0, (f"{current_voice} (Custom)", current_voice))
+                        
+                    yield Select(voice_options, value=current_voice, id="ai_tts_voice", allow_blank=False) # <-- NEW
                     yield Label("Pronouns:") # <-- NEW
-                    yield Select([("He/Him", "he/him"), ("She/Her", "she/her")], value=self.agent_config.pronouns, id="ai_pronouns") # <-- NEW
+                    yield Select([("He/Him", "he/him"), ("She/Her", "she/her"), ("Neither", "neither")], value=self.agent_config.pronouns or "neither", id="ai_pronouns", allow_blank=False) # <-- NEW
                     with Horizontal(classes="config_row"):
                         yield Checkbox("Vision Capable", id="ai_vision_capable", value=self.agent_config.is_capable_vision)
+                        yield Checkbox("Disable All Tools", id="ai_disable_all_tools", value=self.agent_config.disable_all_tools) # <-- NEW
 
                     yield Label("Agent Abilities (Enabled in SAFE mode)", classes="section_label")
                     with VerticalScroll(id="abilities_container"):
@@ -424,7 +803,25 @@ class ConfigModal(ModalScreen[str]):
             self.query_one("#ai_backup_model", Input).value = agent.model
             self.query_one("#ai_backup_base_url", Input).value = agent.base_url
             self.query_one("#ai_backup_api_key", Input).value = agent.get_api_key()
+    
+    @on(Select.Changed, "#ai_base_url_preset")
+    def on_base_url_preset_changed(self, event: Select.Changed):
+        if event.value != "custom" and event.value != Select.BLANK:
+            self.query_one("#ai_base_url", Input).value = str(event.value)
 
+    @on(Input.Changed, "#ai_base_url")
+    def on_base_url_input_changed(self, event: Input.Changed):
+        input_val = event.value.strip()
+        matched = "custom"
+        for label, val in BASE_URL_PRESETS:
+            if val == input_val:
+                matched = val
+                break
+        
+        select_widget = self.query_one("#ai_base_url_preset", Select)
+        if select_widget.value != matched:
+            select_widget.value = matched
+    
     def _get_current_fields(self):
         enabled_tools = []
         for tool_name in self.high_priv_tools:
@@ -437,6 +834,7 @@ class ConfigModal(ModalScreen[str]):
             "model": self.query_one("#ai_model", Input).value.strip(),
             "base_url": self.query_one("#ai_base_url", Input).value.strip(),
             "is_capable_vision": self.query_one("#ai_vision_capable", Checkbox).value,
+            "disable_all_tools": self.query_one("#ai_disable_all_tools", Checkbox).value, # <-- NEW
             "api_key": self.query_one("#ai_api_key", Input).value.strip(),
             "color": self.query_one("#ai_color", Input).value.strip() or "#00FFFF",
             "backup_model": self.query_one("#ai_backup_model", Input).value.strip(),
@@ -444,8 +842,8 @@ class ConfigModal(ModalScreen[str]):
             "backup_api_key": self.query_one("#ai_backup_api_key", Input).value.strip(),
             "use_backup": self.query_one("#ai_use_backup", Checkbox).value,
             "enabled_tools": enabled_tools,
-            "tts_voice": self.query_one("#ai_tts_voice", Input).value.strip() or "af_sarah", # <-- NEW
-            "pronouns": self.query_one("#ai_pronouns", Select).value or "she/her" # <-- NEW
+            "tts_voice": (self.query_one("#ai_tts_voice", Select).value if self.query_one("#ai_tts_voice", Select).value != Select.BLANK else None) or "af_sarah", # <-- NEW
+            "pronouns": (self.query_one("#ai_pronouns", Select).value if self.query_one("#ai_pronouns", Select).value != Select.BLANK else None) or "she/her" # <-- NEW
         }
 
     def _apply_save(self, is_new: bool):
@@ -453,19 +851,36 @@ class ConfigModal(ModalScreen[str]):
         if not fields["name"]:
             return
 
-        # Handle Termux/EncryptedKeyring blocking
-        from toolbox import get_locked_keyring, unlock_keyring
+        # Define the callback at the function level. It still safely closes over `is_new`.
+        def handle_unlock(result):
+            if not result:
+                return
+            action, password = result
+            if action == "unlock" and password:
+                if unlock_keyring(password):
+                    self.notify("Keyring unlocked. Saving...", severity="information")
+                    self._apply_save(is_new)
+                else:
+                    self.notify("Unlock failed.", severity="error")
+            elif action == "reset" and password:
+                try:
+                    import keyring, os
+                    backend = keyring.get_keyring()
+                    backends = [backend]
+                    if hasattr(backend, 'backends'):
+                        backends.extend(backend.backends)
+                    for b in backends:
+                        if type(b).__name__ == "EncryptedKeyring":
+                            if hasattr(b, "file_path") and b.file_path and os.path.exists(b.file_path):
+                                os.remove(b.file_path)
+                            b.__dict__['keyring_key'] = password
+                    self.notify("Keyring reset successfully. Saving...", severity="warning")
+                    self._apply_save(is_new)
+                except Exception as e:
+                    self.notify(f"Reset failed: {e}", severity="error")
+
         locked_keyring = get_locked_keyring()
         if locked_keyring:
-            def handle_unlock(password):
-                if password:
-                    if unlock_keyring(password):
-                        self.notify("Keyring unlocked. Saving...", severity="information")
-                        # Re-run save now that it's unlocked
-                        self._apply_save(is_new)
-                    else:
-                        self.notify("Unlock failed.", severity="error")
-            
             self.app.push_screen(KeyringUnlockModal(), handle_unlock)
             return
 
@@ -481,7 +896,8 @@ class ConfigModal(ModalScreen[str]):
             use_backup=fields["use_backup"],
             enabled_tools=fields["enabled_tools"],
             tts_voice=fields["tts_voice"], # <-- NEW
-            pronouns=fields["pronouns"] # <-- NEW
+            pronouns=fields["pronouns"], # <-- NEW
+            disable_all_tools=fields["disable_all_tools"] # <-- NEW
         )
 
 
@@ -542,17 +958,10 @@ class ConfigModal(ModalScreen[str]):
 # Mapping of slash command descriptions for the table
 SLASH_COMMAND_DESCS = {
     "/tools": "List status of all available AI tools",
-    "/tools desc": "List tools with detailed descriptions",
-    "/tools nodesc": "List tools without descriptions",
     "/arm": "Toggle ARM/SAFE (Execute/Plan) mode",
     "/config": "Open active agent configuration",
     "/safe": "Lock system to SAFE (Plan, read-only) mode",
-    "/ide": "Switch focus to the integrated Text IDE",
-    "/ide disable": "Disable IDE integration",
-    "/ide enable": "Enable IDE integration",
-    "/ide install": "Install IDE environment packages",
-    "/ide status": "Show IDE integration status",
-    "/init": "Create GEMINI.md project instructions file",
+    "/init": "Create Federate.md project instructions file",
     "/compress": "Compress chat context to save tokens",
     "/copy": "Copy last AI response to system clipboard",
     "/directory": "Open interactive directory picker",
@@ -565,6 +974,7 @@ SLASH_COMMAND_DESCS = {
     "/select_agent": "Switch the active host agent",
     "/clear_all": "Wipe memory and history of all agents",
     "/skills": "List all passive and active skills for the active agent",
+    "/settings": "Open global harness settings modal",
     "/help": "Show this detailed help menu"
 }
 
@@ -581,22 +991,57 @@ class ScheduleModal(ModalScreen[None]):
     .form_row { layout: horizontal; height: auto; margin-bottom: 1; }
     #new_agent { width: 40%; }
     #new_time { width: 60%; margin-left: 1; }
+    #new_date { width: 50%; }
+    #new_repeat { width: 50%; margin-left: 1; }
     """
     def __init__(self, agent_view):
         super().__init__()
         self.agent_view = agent_view
         
+    def _get_next_run(self, task):
+        from datetime import datetime, timedelta
+        import calendar
+        now = datetime.now()
+        try:
+            task_date = datetime.strptime(getattr(task, "date_str", ""), "%Y-%m-%d") if getattr(task, "date_str", "") else now
+            th, tm = map(int, task.time_str.split(":"))
+            candidate = datetime(task_date.year, task_date.month, task_date.day, th, tm)
+        except Exception:
+            return None
+
+        repeat_mode = getattr(task, "repeat", "daily")
+        while candidate <= now or (task.last_run_date == now.strftime("%Y-%m-%d") and candidate.date() <= now.date()):
+            if repeat_mode == "daily":
+                candidate += timedelta(days=1)
+            elif repeat_mode == "weekly":
+                candidate += timedelta(weeks=1)
+            elif repeat_mode == "monthly":
+                month = candidate.month
+                year = candidate.year + (month // 12)
+                month = (month % 12) + 1
+                max_day = calendar.monthrange(year, month)[1]
+                candidate = datetime(year, month, min(task_date.day, max_day), th, tm)
+            elif repeat_mode == "annually":
+                candidate = datetime(candidate.year + 1, task_date.month, task_date.day, th, tm)
+            else:
+                candidate += timedelta(days=1)
+        return candidate
+
     def compose(self) -> ComposeResult:
         with Vertical(id="sched_dialog"):
             yield Label("⏰ Scheduled Tasks", classes="pane_title")
             yield VerticalScroll(id="task_list")
             
             with Vertical(id="add_form"):
-                yield Label("Add New Daily Task:")
+                yield Label("Add New Scheduled Task:")
                 with Horizontal(classes="form_row"):
                     agents = [(a, a) for a in self.agent_view.agent_manager.agents.keys()]
                     yield Select(agents, id="new_agent", prompt="Select Agent")
                     yield Input(placeholder="HH:MM (24h format, e.g., 14:30)", id="new_time")
+                with Horizontal(classes="form_row"):
+                    yield Input(placeholder="YYYY-MM-DD (e.g., 2026-07-16, optional)", id="new_date")
+                    repeats = [("Daily", "daily"), ("Weekly", "weekly"), ("Monthly", "monthly"), ("Annually", "annually")]
+                    yield Select(repeats, value="daily", id="new_repeat", allow_blank=False)
                 yield Input(placeholder="Task Prompt...", id="new_prompt", classes="form_row")
                 with Horizontal(classes="form_row"):
                     yield Button("Add Task", id="add_task_btn", variant="success")
@@ -609,7 +1054,10 @@ class ScheduleModal(ModalScreen[None]):
         container = self.query_one("#task_list")
         container.query("*").remove()
         for t in self.agent_view.schedule_manager.tasks:
-            info = f"[bold cyan]{t.agent_name}[/bold cyan] @ [bold yellow]{t.time_str}[/bold yellow]\n[dim]{t.prompt}[/dim]"
+            next_run = self._get_next_run(t)
+            next_run_str = f"\nNext run: {next_run.strftime('%Y-%m-%d @ %H:%M')}" if next_run else f"Time: {t.time_str}"
+            repeat_part = f" [{getattr(t, 'repeat', 'daily').title()}]"
+            info = f"[bold cyan]{t.agent_name}[/bold cyan]  [bold yellow]{next_run_str}[/bold yellow]{repeat_part}\n[dim]{t.prompt}[/dim]"
             row = Horizontal(
                 Label(info, classes="task_info"),
                 Button("Edit", id=f"edit_{t.id}", variant="primary", classes="task_edit_btn"),
@@ -627,17 +1075,35 @@ class ScheduleModal(ModalScreen[None]):
             agent = self.query_one("#new_agent", Select).value
             time_str = self.query_one("#new_time", Input).value.strip()
             prompt = self.query_one("#new_prompt", Input).value.strip()
+            date_str = self.query_one("#new_date", Input).value.strip()
+            repeat_val = self.query_one("#new_repeat", Select).value
+            repeat = str(repeat_val) if repeat_val != Select.BLANK else "daily"
             
             if agent and Select.BLANK != agent and time_str and prompt:
-                # Basic validation for HH:MM
-                if len(time_str) == 5 and ":" in time_str:
-                    self.agent_view.schedule_manager.add_task(agent, time_str, prompt)
-                    self.query_one("#new_time", Input).value = ""
-                    self.query_one("#new_prompt", Input).value = ""
-                    self.refresh_list()
-                    self.notify("Task added successfully.", severity="information")
-                else:
-                    self.notify("Time must be in HH:MM format (e.g., 08:30 or 15:00)", severity="error")
+                # Strict regex validation for 24-hour HH:MM format (00:00 to 23:59)
+                import re
+                if not re.match(r"^(?:[01]\d|2[0-3]):[0-5]\d$", time_str):
+                    self.notify("Time must be a valid 24-hour time in HH:MM format (e.g., 14:30)", severity="error")
+                    return
+                
+                # Strict calendar validation for YYYY-MM-DD if provided
+                if date_str:
+                    try:
+                        from datetime import datetime
+                        datetime.strptime(date_str, "%Y-%m-%d")
+                    except ValueError:
+                        self.notify("Date must be a valid calendar date in YYYY-MM-DD format (e.g., 2026-07-16)", severity="error")
+                        return
+                
+                # Sanitize the prompt input by stripping leading/trailing whitespace
+                prompt = prompt.strip()
+                
+                self.agent_view.schedule_manager.add_task(agent, time_str, prompt, date_str=date_str, repeat=repeat)
+                self.query_one("#new_time", Input).value = ""
+                self.query_one("#new_date", Input).value = ""
+                self.query_one("#new_prompt", Input).value = ""
+                self.refresh_list()
+                self.notify("Task added successfully.", severity="information")
         elif btn_id and btn_id.startswith("del_"):
             task_id = btn_id[4:]
             self.agent_view.schedule_manager.delete_task(task_id)
@@ -891,22 +1357,28 @@ class ChatInput(TextArea):
         self._suggestion_matches = []
         self.update_suggestions_ui()
 
-def get_welcome_banner(agent_view) -> str:
+_BANNER_STATS = None
+_STATS_LOADING = False
+_WELCOME_STATS_LOCK = threading.Lock()
+
+def invalidate_stats_cache():
+    """Wipes the cached banner statistics to force a background recalculation next time."""
+    global _BANNER_STATS
+    with _WELCOME_STATS_LOCK:
+        _BANNER_STATS = None
+
+def calculate_stats_raw(agent_view) -> dict:
+    """Internal helper that performs the heavy session analysis and token estimation."""
     from datetime import datetime, timedelta
     import glob
     import os
     import json
-    try:
-        from tiktoken import get_encoding
-        HAS_TIKTOKEN = True
-    except ImportError:
-        HAS_TIKTOKEN = False
 
     def estimate_tokens(text: str) -> int:
-        if HAS_TIKTOKEN:
+        cached_enc = getattr(agent_view, "_tiktoken_encoding", None)
+        if cached_enc is not None:
             try:
-                enc = get_encoding("cl100k_base")
-                return len(enc.encode(text))
+                return len(cached_enc.encode(text))
             except Exception:
                 pass
         return len(text) // 4
@@ -985,7 +1457,6 @@ def get_welcome_banner(agent_view) -> str:
                 t_calls = msg.get("tool_calls") or []
                 t_outs = msg.get("tool_outputs") or []
                 
-                # Accumulate tools
                 agent_total_tools[matched_agent] = agent_total_tools.get(matched_agent, 0) + len(t_calls)
                 for out in t_outs:
                     if isinstance(out, dict):
@@ -993,7 +1464,6 @@ def get_welcome_banner(agent_view) -> str:
                         if not any(term in content_lower for term in ["error:", "exception:", "failed:", "failed to"]):
                             agent_successful_tools[matched_agent] = agent_successful_tools.get(matched_agent, 0) + 1
                 
-                # Accumulate Input vs Output tokens
                 if role == "human" or role == "system":
                     agent_input_tokens[matched_agent] = agent_input_tokens.get(matched_agent, 0) + msg_tokens
                     for out in t_outs:
@@ -1002,7 +1472,6 @@ def get_welcome_banner(agent_view) -> str:
                 elif role == "ai":
                     agent_output_tokens[matched_agent] = agent_output_tokens.get(matched_agent, 0) + msg_tokens
                     
-                # Collaborators check
                 if role == "ai" and content:
                     mentions = agent_view.agent_manager.get_mentions(content)
                     if mentions:
@@ -1051,7 +1520,6 @@ def get_welcome_banner(agent_view) -> str:
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     history = json.load(f)
-                # Ensure the history parses correctly as a list of dicts
                 if not isinstance(history, list):
                     history = []
             except Exception:
@@ -1067,7 +1535,6 @@ def get_welcome_banner(agent_view) -> str:
                 t_calls = msg.get("tool_calls") or []
                 t_outs = msg.get("tool_outputs") or []
                 
-                # Accumulate tools
                 agent_total_tools[matched_agent] = agent_total_tools.get(matched_agent, 0) + len(t_calls)
                 for out in t_outs:
                     if isinstance(out, dict):
@@ -1075,7 +1542,6 @@ def get_welcome_banner(agent_view) -> str:
                         if not any(term in content_lower for term in ["error:", "exception:", "failed:", "failed to"]):
                             agent_successful_tools[matched_agent] = agent_successful_tools.get(matched_agent, 0) + 1
                 
-                # Accumulate Input vs Output tokens
                 if role == "human" or role == "system":
                     agent_input_tokens[matched_agent] = agent_input_tokens.get(matched_agent, 0) + msg_tokens
                     for out in t_outs:
@@ -1091,9 +1557,8 @@ def get_welcome_banner(agent_view) -> str:
                             agent_collabs[matched_agent] = set()
                         for m in mentions:
                             if m != matched_agent:
-                                agent_collabs[matched_agent].add(m)
+                                    agent_collabs[matched_agent].add(m)
 
-    # 3. Scan research directory for deep research inputs/outputs
     research_input_tokens = 0
     research_output_tokens = 0
     try:
@@ -1101,19 +1566,16 @@ def get_welcome_banner(agent_view) -> str:
         research_dir = os.path.join(workspace_dir, "research")
         if os.path.exists(research_dir):
             for root, dirs, files in os.walk(research_dir):
-                # Count successful fetches in research_status.log
                 log_path = os.path.join(root, "research_status.log")
                 if os.path.exists(log_path):
                     try:
                         with open(log_path, "r", encoding="utf-8", errors="ignore") as lf:
                             for line in lf:
                                 if "[FETCH]" in line:
-                                    # Each successful fetch averages around 6,000 tokens of input webpage content
                                     research_input_tokens += 6000
                     except Exception:
                         pass
                 
-                # Count tokens of generated markdown annexures/reports
                 for file in files:
                     if file.endswith(".md") and file != "research_status.log":
                         file_path = os.path.join(root, file)
@@ -1126,25 +1588,131 @@ def get_welcome_banner(agent_view) -> str:
     except Exception:
         pass
 
-    # Calculate best agent
+    return {
+        "agent_input_tokens": agent_input_tokens,
+        "agent_output_tokens": agent_output_tokens,
+        "agent_total_tools": agent_total_tools,
+        "agent_successful_tools": agent_successful_tools,
+        "agent_collabs": agent_collabs,
+        "total_conversations_all_time": total_conversations_all_time,
+        "total_conversations_target_month": total_conversations_target_month,
+        "research_input_tokens": research_input_tokens,
+        "research_output_tokens": research_output_tokens,
+        "used_month_name": used_month_name,
+        "session_files": session_files
+    }
+
+def trigger_stats_loading(agent_view):
+    """Triggers background stats collection thread to avoid freezing the TUI."""
+    global _BANNER_STATS, _STATS_LOADING
+    with _WELCOME_STATS_LOCK:
+        if _STATS_LOADING:
+            return
+        _STATS_LOADING = True
+        
+    def run():
+        global _BANNER_STATS, _STATS_LOADING
+        try:
+            stats = calculate_stats_raw(agent_view)
+            _BANNER_STATS = stats
+            
+            # Post-completion UI update callback on TUI main event loop
+            def update_ui():
+                try:
+                    banners = agent_view.query(".welcome_banner_box")
+                    if banners:
+                        for banner in banners:
+                            active_agent_name = getattr(agent_view, "active_agent", None)
+                            spec_name = active_agent_name.name if active_agent_name else None
+                            new_renderable = get_welcome_banner(agent_view, specific_agent=spec_name, return_renderable=True)
+                            banner.update(new_renderable)
+                except Exception:
+                    pass
+            agent_view.app.call_from_thread(update_ui)
+        except Exception:
+            pass
+        finally:
+            with _WELCOME_STATS_LOCK:
+                _STATS_LOADING = False
+                
+    threading.Thread(target=run, daemon=True).start()
+
+def get_welcome_banner(agent_view, specific_agent: str = None, return_renderable: bool = False):
+    global _BANNER_STATS, _STATS_LOADING
+    
+    # 1. Return a non-blocking loading placeholder if statistical data is not yet available
+    if _BANNER_STATS is None:
+        if not _STATS_LOADING:
+            trigger_stats_loading(agent_view)
+            
+        from rich.console import Group
+        from rich.text import Text
+        from rich.table import Table
+        from rich.rule import Rule
+        
+        title_text = Text.from_markup("[bold #f2a813]\u276f [/bold #f2a813][bold #da6057]FEDERATE[/bold #da6057]\n\u00a9 Rock Lab Private Limited", justify="center")
+        divider = Rule(style="#f2a813")
+        
+        loading_table = Table(show_header=False, expand=True, box=None, padding=(0, 2))
+        loading_table.add_column(ratio=1, justify="center")
+        loading_table.add_row(Text.from_markup("[dim]📊 Processing agent telemetry & stats...[/dim]"))
+        
+        tips_text = Text.from_markup(
+            "  [bold #f2a813]Tips for getting started:[/bold #f2a813]\n"
+            "  1. Ask questions, edit files, or run commands.\n"
+            "  2. Use & to inject files. Use @ to invoke particular agents.\n"
+            "  3. Press F2 to configure the active agent.\n"
+            "  4. Press Ctrl+K to start a fresh conversation."
+        )
+        
+        renderable_group = Group(
+            title_text,
+            divider,
+            loading_table,
+            divider,
+            tips_text
+        )
+        if return_renderable:
+            return renderable_group
+        return Static(renderable_group, classes="welcome_banner_box")
+
+    # 2. Construct the layout instantly using cached background stats
+    stats = _BANNER_STATS
+    agent_input_tokens = stats["agent_input_tokens"]
+    agent_output_tokens = stats["agent_output_tokens"]
+    agent_total_tools = stats["agent_total_tools"]
+    agent_successful_tools = stats["agent_successful_tools"]
+    agent_collabs = stats["agent_collabs"]
+    total_conversations_all_time = stats["total_conversations_all_time"]
+    total_conversations_target_month = stats["total_conversations_target_month"]
+    research_input_tokens = stats["research_input_tokens"]
+    research_output_tokens = stats["research_output_tokens"]
+    used_month_name = stats["used_month_name"]
+    session_files = stats["session_files"]
+
     agent_total_tokens = {}
     for agent in set(list(agent_input_tokens.keys()) + list(agent_output_tokens.keys())):
         agent_total_tokens[agent] = agent_input_tokens.get(agent, 0) + agent_output_tokens.get(agent, 0)
 
-    if agent_total_tokens:
+    if specific_agent:
+        best_agent = specific_agent
+        inp_tokens = agent_input_tokens.get(best_agent, 0)
+        out_tokens = agent_output_tokens.get(best_agent, 0)
+        collabs = list(agent_collabs.get(best_agent, []))
+        total_convs = sum(1 for f in session_files if best_agent.replace(" ", "_").lower() in f.lower())
+    elif agent_total_tokens:
         best_agent = max(agent_total_tokens, key=agent_total_tokens.get)
         inp_tokens = agent_input_tokens.get(best_agent, 0) + research_input_tokens
         out_tokens = agent_output_tokens.get(best_agent, 0) + research_output_tokens
         collabs = list(agent_collabs.get(best_agent, []))
+        total_convs = len(total_conversations_all_time)
     else:
         best_agent = agent_view.active_agent.name if getattr(agent_view, "active_agent", None) else "Rita"
         inp_tokens = research_input_tokens
         out_tokens = research_output_tokens
         collabs = []
-        
-    total_convs = len(total_conversations_all_time)
+        total_convs = len(total_conversations_all_time)
 
-    # Retrieve specific agent colors
     def get_agent_color(name: str) -> str:
         agent = agent_view.agent_manager.get_agent(name)
         return agent.color if agent else "#00FFFF"
@@ -1157,7 +1725,6 @@ def get_welcome_banner(agent_view) -> str:
         colored_collabs.append(f"[bold {c_color}]{c}[/]")
     collaborations = ", ".join(colored_collabs) if colored_collabs else "None"
 
-    # Fetch skills count for the best agent
     safe_name = best_agent.replace(" ", "_")
     skills_dir = get_storage_path("agents", "skills", safe_name)
     passive_count = 0
@@ -1175,54 +1742,77 @@ def get_welcome_banner(agent_view) -> str:
         except Exception:
             pass
 
-    # Dynamic metrics calculations for tool call success rates
-    total_tools_run = sum(agent_total_tools.values())
-    successful_tools_run = sum(agent_successful_tools.values())
+    # FIXED: Compute tool stats bound directly to the shown best_agent rather than global sums
+    total_tools_run = agent_total_tools.get(best_agent, 0)
+    successful_tools_run = agent_successful_tools.get(best_agent, 0)
     
     t_pct = int((successful_tools_run / total_tools_run) * 100) if total_tools_run > 0 else 0
 
-    # Width configuration to perfectly align columns
-    # Outer width is 70 characters
-    def make_row(text: str) -> str:
-        space_len = 66 - len(text)
-        left_space = space_len // 2
-        right_space = space_len - left_space
-        return f"│ {' ' * left_space}{text}{' ' * right_space} │"
+    from rich.console import Group
+    from rich.text import Text
+    from rich.table import Table
+    from rich.rule import Rule
 
-    def make_line(desc: str, value: str) -> str:
-        import re
-        visible_value = re.sub(r'\[/?.*?\]', '', value)
-        space_len = 40 - len(visible_value)
-        if space_len < 0:
-            space_len = 0
-        return f"│  {desc:<21} │ {value}{' ' * space_len}  │"
+    title_text = Text.from_markup("[bold #f2a813]\u276f [/bold #f2a813][bold #da6057]FEDERATE[/bold #da6057]\n\u00a9 Rock Lab Private Limited", justify="center")
+    divider = Rule(style="#f2a813")
 
-    lines = [
-        "╭" + "─" * 68 + "╮",
-        make_row("Federate.AI"),
-        "├" + "─" * 68 + "┤",
-        make_line("Agent of the Month", f"[bold {best_agent_color}]{best_agent}[/] ({used_month_name})"),
-        make_line("Processed Tokens", f"[green]{inp_tokens:,}[/] / [blue]{out_tokens:,}[/]"),
-        make_line("Total Conversations", f"{total_convs:,}"),
-        make_line("Tool Calls", f"{successful_tools_run:,} / {total_tools_run:,} ({t_pct}%)"),
-        make_line("Skills", f"[blue]{passive_count}[/] / [red]{active_count}[/]"),
-        make_line("Collaborators", collaborations),
-        "╰" + "─" * 68 + "╯"
-    ]
+    table = Table(
+        show_header=False,
+        expand=True,
+        box=None,
+        padding=(0, 2),
+        border_style="#f2a813"
+    )
+    table.add_column(ratio=1, justify="left")
+    table.add_column(ratio=1, justify="left")
 
-    colors = ["#f2a813", "#ec9624", "#ec9624", "#e68435", "#e07246", "#da6057", "#d44e68", "#ce3c79", "#c82a8a", "#c2189b"]
-    colored_lines = []
-    for line, color in zip(lines, colors):
-        colored_lines.append(f"[{color}]{line}[/]")
-        
-    tips = """
-[#f2a813]Tips for getting started:[/]
-1. Ask questions, edit files, or run commands.
-2. Use & to inject files. Use @ to invoke particular agents.
-3. Press F2 to configure the active agent.
-4. Press Ctrl+K to start a fresh conversation.
-"""
-    return "\n".join(colored_lines) + "\n" + tips
+    title_prefix = "Active Agent Stats:" if specific_agent else "Agent of the Month:"
+    month_suffix = " [dim][/]" if specific_agent else f" [dim]({used_month_name})[/]"
+    
+    table.add_row(
+        Text.from_markup(f"[bold #e98435]{title_prefix}[/bold #e98435]"),
+        Text.from_markup(f"[bold {best_agent_color}]{best_agent}[/]{month_suffix}")
+    )
+    table.add_row(
+        Text.from_markup("[bold #e07246]Processed Tokens:[/bold #e07246]"),
+        Text.from_markup(f"[green]{inp_tokens:,}[/] / [blue]{out_tokens:,}[/]")
+    )
+    table.add_row(
+        Text.from_markup("[bold #da6057]Total Conversations:[/bold #da6057]"),
+        Text.from_markup(f"{total_convs:,}")
+    )
+    table.add_row(
+        Text.from_markup("[bold #d44e68]Tool Calls:[/bold #d44e68]"),
+        Text.from_markup(f"{successful_tools_run:,} / {total_tools_run:,} [dim]({t_pct}%)[/dim]")
+    )
+    table.add_row(
+        Text.from_markup("[bold #ce3c79]Skills:[/bold #ce3c79]"),
+        Text.from_markup(f"[blue]{passive_count}[/] / [red]{active_count}[/]")
+    )
+    table.add_row(
+        Text.from_markup("[bold #c82a8a]Collaborators:[/bold #c82a8a]"),
+        Text.from_markup(collaborations)
+    )
+
+    tips_text = Text.from_markup(
+        "  [bold #f2a813]Tips for getting started:[/bold #f2a813]\n"
+        "  1. Ask questions, edit files, or run commands.\n"
+        "  2. Use & to inject files. Use @ to invoke particular agents.\n"
+        "  3. Press F2 to configure the active agent.\n"
+        "  4. Press Ctrl+K to start a fresh conversation."
+    )
+
+    renderable_group = Group(
+        title_text,
+        divider,
+        table,
+        divider,
+        tips_text
+    )
+
+    if return_renderable:
+        return renderable_group
+    return Static(renderable_group, classes="welcome_banner_box")
 
 def render_latex_to_unicode(text: str) -> str:
     """Parses LaTeX math blocks into Unicode for terminal rendering."""
@@ -1253,11 +1843,12 @@ class AIAgentView(Vertical):
     BINDINGS =[
         Binding("f2", "open_chat_manager", "Sessions"),
         Binding("ctrl+k", "clear_all_contexts", "New Chat", priority=True),
-        Binding("f4", "open_active_config", "Edit Agent"),
+        Binding("f4", "open_active_config", "Manage Agents"),
         Binding("f5", "switch_agent", "Switch Agent"),
         Binding("ctrl+t", "cycle_arm_mode", "Cycle Mode"),
         Binding("ctrl+g", "cycle_agents", "Cycle Agents"),
         Binding("ctrl+a", "abort", "Abort"),
+        Binding("f3", "open_global_settings", "Settings"),
     ]
 
     DEFAULT_CSS = """
@@ -1339,6 +1930,12 @@ class AIAgentView(Vertical):
         margin: 1 0;
         color: #808080;
     }
+    .welcome_banner_box {
+        border: round #f2a813;
+        background: $boost;
+        padding: 0 0;
+        margin: 0 0 1 0;
+    }
     """
 
     def compose(self) -> ComposeResult:
@@ -1363,6 +1960,7 @@ class AIAgentView(Vertical):
 
     def on_mount(self):
         toolbox.CURRENT_APP = self.app
+        toolbox.CURRENT_AGENT_VIEW = self
         toolbox.CURRENT_LOG_CB = self.log_to_ui
         self.current_tokens = 0
         
@@ -1380,17 +1978,44 @@ class AIAgentView(Vertical):
         # STARTUP: Handle Termux/EncryptedKeyring blocking
         from toolbox import is_keyring_locked, unlock_keyring
         if is_keyring_locked():
-            def handle_initial_unlock(password):
-                if password:
-                    if unlock_keyring(password):
-                        self.notify("Keyring unlocked.", severity="information")
-                        # Refresh agent so it pulls decrypted keys
-                        self.select_agent(self.active_agent.name)
-                        self.update_status_bar()
-                    else:
-                        self.notify("Initial unlock failed. Stored keys may be unavailable.", severity="error")
+            def handle_initial_unlock(result):
+                if result:
+                    action, password = result
+                    if action == "unlock" and password:
+                        if unlock_keyring(password):
+                            self.notify("Keyring unlocked.", severity="information")
+                            self.select_agent(self.active_agent.name)
+                            self.update_status_bar()
+                            self.check_onboarding()
+                        else:
+                            self.notify("Unlock failed. Stored keys may be unavailable.", severity="error")
+                            self.check_onboarding()
+                    elif action == "reset" and password:
+                        try:
+                            import keyring, os
+                            backend = keyring.get_keyring()
+                            backends = [backend]
+                            if hasattr(backend, 'backends'):
+                                backends.extend(backend.backends)
+                                
+                            for b in backends:
+                                if type(b).__name__ == "EncryptedKeyring":
+                                    # Dynamically resolve and delete the file if it exists
+                                    if hasattr(b, "file_path") and b.file_path and os.path.exists(b.file_path):
+                                        os.remove(b.file_path)
+                                    # Inject the new password into memory
+                                    b.__dict__['keyring_key'] = password
+                            
+                            self.notify("Keyring initialized successfully. New password established.", severity="warning")
+                            self.select_agent(self.active_agent.name)
+                            self.update_status_bar()
+                            self.check_onboarding()
+                        except Exception as e:
+                            self.notify(f"Reset failed: {e}", severity="error")
             
             self.app.push_screen(KeyringUnlockModal(), handle_initial_unlock)
+        else:
+            self.check_onboarding()
         
         self.agent_executors = {} # Cache for react agents
         self.shell_mode = False
@@ -1432,7 +2057,7 @@ class AIAgentView(Vertical):
         agent = self.agent_manager.get_agent(name)
         if agent:
             self.active_agent = agent
-            self.session_manager.init_agent_session(agent, list(self.agent_manager.agents.values()))
+            #self.session_manager.init_agent_session(agent, list(self.agent_manager.agents.values()))
             
             # Apply agent-specific color to the UI programmatically
             try:
@@ -1469,8 +2094,11 @@ class AIAgentView(Vertical):
         return final_result[0]
     
     def action_clear_all_contexts(self):
+        if self._running_agents:
+            self.action_abort() 
         self.session_manager.clear_all_contexts()
         self.clear_chat_ui()
+        invalidate_stats_cache() # Evicts old stats cache prior to rebuild
         self._write_log(Rule(title="[bold yellow]ALL CONTEXTS CLEARED", style="dim"))
         self._write_log(get_welcome_banner(self))
         self.update_tokens()
@@ -1522,6 +2150,16 @@ class AIAgentView(Vertical):
                 if res["default"]:
                     self.agent_manager.set_default_agent_name(res["name"])
                     self.log_to_ui(f"[bold #f2a813]Default agent set to: {res['name']}[/bold #f2a813]")
+                else:
+                    self.log_to_ui(f"[bold green]Switched active agent to: {res['name']}[/bold green]")
+                new_renderable = get_welcome_banner(self, specific_agent=res["name"], return_renderable=True)
+                banners = self.query(".welcome_banner_box")
+                if banners:
+                    for banner in banners:
+                        banner.update(new_renderable)
+                else:
+                    from textual.widgets import Static
+                    self._write_log(Static(new_renderable, classes="welcome_banner_box"))
         self.app.push_screen(SwitchAgentModal(names, default), handle_switch)
 
     
@@ -1617,6 +2255,14 @@ class AIAgentView(Vertical):
 
         self.app.push_screen(ConfigModal(self.active_agent, self.agent_manager), handle_modal_result)
     
+    def action_open_global_settings(self):
+        """F3: Opens the global harness settings."""
+        def handle_global_config(result):
+            if result == "update":
+                self.log_to_ui("[bold green]✅ Global settings successfully updated.[/bold green]")
+                
+        self.app.push_screen(GlobalSettingsModal(), handle_global_config)
+    
     def action_open_config(self):
         """Now handles F2 Chat Management."""
         def handle_chat_mgr(action):
@@ -1662,9 +2308,13 @@ class AIAgentView(Vertical):
                     msg_to_render = render_latex_to_unicode(msg)
                     widget = Static(Markdown(msg_to_render), classes="chat_msg")
                 else:
-                    widget = Static(Text.from_markup(msg), classes="chat_msg")
+                    try:
+                        widget = Static(Text.from_markup(msg), classes="chat_msg", markup=False)
+                    except Exception:
+                        # Fallback to plain, unparsed text if the markup parser fails on raw bracketed logs
+                        widget = Static(Text(msg), classes="chat_msg", markup=False)
             elif isinstance(msg, (Rule, Text, Markdown)):
-                widget = Static(msg, classes="chat_msg")
+                widget = Static(msg, classes="chat_msg", markup=False)
             else:
                 widget = msg
             chat_body.mount(widget)
@@ -1734,6 +2384,14 @@ class AIAgentView(Vertical):
         
         if self.select_agent(next_name):
             self.log_to_ui(f"[bold green]Cycled active agent to: {next_name}[/bold green]")
+            new_renderable = get_welcome_banner(self, specific_agent=next_name, return_renderable=True)
+            banners = self.query(".welcome_banner_box")
+            if banners:
+                for banner in banners:
+                    banner.update(new_renderable)
+            else:
+                from textual.widgets import Static
+                self._write_log(Static(new_renderable, classes="welcome_banner_box"))
 
     def toggle_plan_mode(self):
         """Maintains backwards compatibility for any slash command hooks using the old toggle."""
@@ -1772,72 +2430,175 @@ class AIAgentView(Vertical):
             timeout=120,
             model_kwargs={"reasoning_effort": "high"}
         )
-        
-        tools =[list_files, search_web, perform_research, manage_agenda, update_core_memory, save_skill, read_skill, distill_journey, delete_passive_skill, list_skills, mark_quagmire, get_user_clarification, search_episodic_memory, retrieve_episodic_memory, prepare_active_skill, finalize_active_skill, manage_active_skill, fix_active_skill]
 
-        # Load dynamic tools from Skills (Active Skills)
-        dynamic_tools = load_dynamic_tools(agent_config.name)
-        tools.extend(dynamic_tools)
-
-        # Add high-privilege tools if in EXECUTE mode OR if explicitly enabled for this agent
-
-        # High-privilege tool mapping
-        high_priv_map = {
-            "read_file": read_file,
-            "curl_url": curl_url,
-            "save_file": save_file,
-            "edit_file": edit_file,
-            "dispatch_subagent": dispatch_subagent,
-            "run_terminal_command": run_terminal_command,
-            "take_screenshot": take_screenshot,        
-            "click_at_current_location": click_at_current_location,
-            "move_cursor_absolute": move_cursor_absolute, 
-            "move_cursor_relative": move_cursor_relative,       
-            "send_scroll": send_scroll,                    
-            "inject_keyboard_input": inject_keyboard_input
-        }
-        
-        from langchain_core.tools import StructuredTool
-
-        # Helper function to wrap any tool in a user-authorization guardrail
-        def make_wrapped_tool(t_obj):
-            def wrapped_func(*args, **kwargs):
-                agent_name = getattr(toolbox.thread_context, "agent_name", "Agent")
-                confirmed = self.confirm_tool_execution(t_obj.name, kwargs, agent_name=agent_name)
-                if not confirmed:
-                    return f"Error: Tool execution of '{t_obj.name}' was rejected by the user."
-                res = t_obj.func(*args, **kwargs)
-                if isinstance(res, str) and "[ImageBase64:" in res:
-                    parts = re.split(r'\[ImageBase64:\s*(data:image/[a-zA-Z]+;base64,[^\]]+)\]', res)
-                    if len(parts) > 1:
-                        content_list = []
-                        for i, part in enumerate(parts):
-                            if i % 2 == 0:
-                                if part.strip(): content_list.append({"type": "text", "text": part.strip()})
-                            else:
-                                url = part.strip().replace("\n", "").replace("\r", "").replace(" ", "")
-                                content_list.append({"type": "image_url", "image_url": {"url": url}})
-                        return content_list
-                return res
-            return StructuredTool(
-                name=t_obj.name,
-                description=t_obj.description,
-                args_schema=t_obj.args_schema,
-                func=wrapped_func
-            )
-
-        if self.agent_mode == "EXECUTE":
-            # Fully Armed: All high-privilege tools are present and execute automatically.
-            tools.extend(list(high_priv_map.values()))
-            
-        elif self.agent_mode == "INTERMEDIATE":
-            # Semi-Armed: All high-privilege tools are present, but every execution requires approval.
-            for tname, tool_obj in high_priv_map.items():
-                tools.append(make_wrapped_tool(tool_obj))
+        # Unified message pre-processor to intercept tool outputs and extract image payloads.
+        # It packages image data strictly inside companion HumanMessages immediately 
+        # following the ToolMessage, enabling real-time visual analysis while remaining 
+        # compliant with all LLM provider APIs (Gemini, Claude, OpenAI).
+        def preprocess_messages(messages):
+            if not isinstance(messages, list):
+                return messages
+            processed = []
+            for msg in messages:
+                processed.append(msg)
                 
-        else: # PLAN (SAFE) Mode
-                # Safe Mode: Only high-privilege tools explicitly allowed in the agent's config are present,
-                # but they must also go through the confirmation modal before running.
+                # Check for image triggers within plain-text ToolMessage responses
+                if msg.__class__.__name__ == "ToolMessage" and isinstance(msg.content, str):
+                    # Guardrail: Do not extract images if viewing source code, file structures, 
+                    # or raw search results to prevent matching dummy tags or literal string variables.
+                    tool_name = getattr(msg, "name", None)
+                    if tool_name in {"read_file", "edit_file", "save_file", "list_files", "search_web", "perform_research", "manage_agenda"}:
+                        continue
+                    
+                    # Case A: Local file paths - Support multiple images
+                    if "[Attached Image:" in msg.content:
+                        matches = re.finditer(r'\[Attached Image:\s*(.*?)\]', msg.content)
+                        for match in matches:
+                            filepath = match.group(1).strip()
+                            try:
+                                from toolbox import get_safe_path
+                                import base64, mimetypes
+                                resolved_path, _ = get_safe_path(filepath)
+                                if os.path.exists(resolved_path):
+                                    mime = mimetypes.guess_type(resolved_path)[0] or "image/png"
+                                    with open(resolved_path, "rb") as f:
+                                        b64 = base64.b64encode(f.read()).decode('utf-8')
+                                    
+                                    companion = HumanMessage(content=[
+                                        {"type": "text", "text": f"[Attached Image: {filepath}]"},
+                                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                                    ])
+                                    processed.append(companion)
+                            except Exception:
+                                pass
+                                
+                    # Case B: Legacy direct Base64 output streams - Support multiple images
+                    if "[ImageBase64:" in msg.content:
+                        matches = re.finditer(r'\[ImageBase64:\s*(data:image/[a-zA-Z]+;base64,[^\]]+)\]', msg.content)
+                        for match in matches:
+                            url = match.group(1).strip().replace("\n", "").replace("\r", "").replace(" ", "")
+                            # Guardrail: Ignore variables, template markers, or unfinished streams
+                            if any(marker in url for marker in ["{", "}", "<", ">", "b64_str", "base64data"]):
+                                continue
+                            # Omit the giant Base64 text wall from the ToolMessage inline to save input tokens
+                            msg.content = msg.content.replace(match.group(0), "[ImageBase64: <data_transmitted>]")
+                            companion = HumanMessage(content=[
+                                {"type": "text", "text": "[Dynamic Visual Output]:"},
+                                {"type": "image_url", "image_url": {"url": url}}
+                            ])
+                            processed.append(companion)
+            return processed
+
+        # Intercept LLM execution at the lowest level of BaseChatModel
+        orig_generate = llm._generate
+        def patched_generate(messages, stop=None, run_manager=None, **kwargs):
+            processed_messages = preprocess_messages(messages)
+            return orig_generate(processed_messages, stop=stop, run_manager=run_manager, **kwargs)
+        llm._generate = patched_generate
+
+        orig_stream = llm._stream
+        def patched_stream(messages, stop=None, run_manager=None, **kwargs):
+            processed_messages = preprocess_messages(messages)
+            return orig_stream(processed_messages, stop=stop, run_manager=run_manager, **kwargs)
+        llm._stream = patched_stream
+        
+        # --- NEW: ENFORCE DYNAMIC RESTRICTIONS ---
+        if agent_config.disable_all_tools:
+            # Only passive text-only skills, memories, and clarification remain active
+            tools = [
+                update_core_memory, save_skill, read_skill, list_skills, 
+                distill_journey, delete_passive_skill, mark_quagmire, 
+                get_user_clarification, search_episodic_memory, retrieve_episodic_memory
+            ]
+            allowed_names = {t.name for t in tools}
+            
+            # Map out all executable, terminal, research, active skill development, and high-privilege tools
+            other_tool_names = [
+                "list_files", "search_web", "perform_research", "manage_agenda",
+                "read_file", "curl_url", "save_file", "edit_file", 
+                "dispatch_subagent", "run_terminal_command", "take_screenshot",        
+                "click_at_current_location", "move_cursor_absolute", 
+                "move_cursor_relative", "send_scroll", "inject_keyboard_input",
+                "prepare_active_skill", "finalize_active_skill", "manage_active_skill", "fix_active_skill"
+            ]
+            try:
+                dynamic_tools = load_dynamic_tools(agent_config.name)
+                for dt in dynamic_tools:
+                    if dt.name not in other_tool_names:
+                        other_tool_names.append(dt.name)
+            except Exception:
+                pass
+                
+            # Create safe, dummy unauthorized placeholders for all executable tools
+            from langchain_core.tools import StructuredTool
+            dummy_tools = []
+            for name in other_tool_names:
+                dummy_tools.append(StructuredTool.from_function(
+                    func=lambda *args, name=name, **kwargs: f"Error: Tool '{name}' is unauthorized. All tools are disabled for this agent.",
+                    name=name,
+                    description=f"Unauthorized placeholder."
+                ))
+                
+            tools.extend(dummy_tools)
+            
+            # Intercept the tool-binding interface to hide restricted tools from the LLM's system prompt
+            class RestrictedModelWrapper:
+                def __init__(self, model, allowed_names):
+                    self.model = model
+                    self.allowed_names = allowed_names
+                def bind_tools(self, tools, **kwargs):
+                    allowed_bind_tools = [t for t in tools if t.name in self.allowed_names]
+                    return self.model.bind_tools(allowed_bind_tools, **kwargs)
+                def __getattr__(self, name):
+                    return getattr(self.model, name)
+                    
+            llm = RestrictedModelWrapper(llm, allowed_names)
+            
+        else:
+            # (Standard Tool compilation path for unrestricted agents)
+            tools =[list_files, search_web, perform_research, manage_agenda, update_core_memory, save_skill, read_skill, distill_journey, delete_passive_skill, list_skills, mark_quagmire, get_user_clarification, search_episodic_memory, retrieve_episodic_memory, prepare_active_skill, finalize_active_skill, manage_active_skill, fix_active_skill]
+
+            dynamic_tools = load_dynamic_tools(agent_config.name)
+            tools.extend(dynamic_tools)
+
+            high_priv_map = {
+                "read_file": read_file,
+                "curl_url": curl_url,
+                "save_file": save_file,
+                "edit_file": edit_file,
+                "dispatch_subagent": dispatch_subagent,
+                "run_terminal_command": run_terminal_command,
+                "take_screenshot": take_screenshot,        
+                "click_at_current_location": click_at_current_location,
+                "move_cursor_absolute": move_cursor_absolute, 
+                "move_cursor_relative": move_cursor_relative,       
+                "send_scroll": send_scroll,                    
+                "inject_keyboard_input": inject_keyboard_input
+            }
+            
+            from langchain_core.tools import StructuredTool
+
+            def make_wrapped_tool(t_obj):
+                def wrapped_func(*args, **kwargs):
+                    agent_name = getattr(toolbox.thread_context, "agent_name", "Agent")
+                    confirmed = self.confirm_tool_execution(t_obj.name, kwargs, agent_name=agent_name)
+                    if not confirmed:
+                        return f"Error: Tool execution of '{t_obj.name}' was rejected by the user."
+                    res = t_obj.func(*args, **kwargs)
+                    return res
+                return StructuredTool(
+                    name=t_obj.name,
+                    description=t_obj.description,
+                    args_schema=t_obj.args_schema,
+                    func=wrapped_func
+                )
+
+            if self.agent_mode == "EXECUTE":
+                tools.extend(list(high_priv_map.values()))
+            elif self.agent_mode == "INTERMEDIATE":
+                for tname, tool_obj in high_priv_map.items():
+                    tools.append(make_wrapped_tool(tool_obj))
+            else: # PLAN (SAFE) Mode
                 for tname in agent_config.enabled_tools:
                     if tname == "visual_computer_operation":
                         for ct in ["take_screenshot", "click_at_current_location", "move_cursor_absolute", "move_cursor_relative", "send_scroll", "inject_keyboard_input"]:
@@ -2107,14 +2868,15 @@ class AIAgentView(Vertical):
                                     ))
                                     
                                     # 2. Global Companion Injection: 
-                                    # If ANY tool response contains an image, append a companion HumanMessage
+                                    # If ANY tool response contains an image, append companion HumanMessages
                                     if "[Attached Image:" in tool_content:
-                                        match = re.search(r'\[Attached Image: (.*?)\]', tool_content)
-                                        if match and agent.is_capable_vision:
-                                            filepath = match.group(1).strip()
-                                            langchain_messages.append(HumanMessage(
-                                                content=_format_vision_content(f"[Attached Image: {filepath}]", True)
-                                            ))
+                                        matches = re.finditer(r'\[Attached Image: (.*?)\]', tool_content)
+                                        for match in matches:
+                                            if agent.is_capable_vision:
+                                                filepath = match.group(1).strip()
+                                                langchain_messages.append(HumanMessage(
+                                                    content=_format_vision_content(f"[Attached Image: {filepath}]", True)
+                                                ))
                                 else:
                                     # Placeholder for unfinished calls to satisfy LangGraph validation
                                     self.log_to_ui(f"[dim yellow]🛠️ Healing interrupted tool call: {tc_name}[/dim yellow]")
@@ -2182,7 +2944,7 @@ class AIAgentView(Vertical):
                             if tcs:
                                 for tc in tcs:
                                     if "id" in tc:
-                                        needed_responses[tc["id"]] = tc.get("name", "tool")
+                                        needed_responses[tc["id"]] = tc.get("name") or "tool"
 
                             # Remove those that have responses (ToolMessage has tool_call_id)
                             tcid = getattr(m, "tool_call_id", None)
@@ -2306,20 +3068,30 @@ class AIAgentView(Vertical):
                                                     if block.get("type") == "text":
                                                         reconstructed += block.get("text", "")
                                                     elif block.get("type") == "image_url":
-                                                        reconstructed += "\n[ImageBase64: <base64_data_omitted>]\n"
+                                                        reconstructed += "\n[ImageBase64: <data_transmitted>]\n"
                                                 content_to_save = reconstructed
                                                 
                                             tool_outputs.append({"name": tool_name, "content": content_to_save})
+                                            
+                                            if "[Attached Image:" in str(content_to_save):
+                                                img_match = re.search(r'\[Attached Image: (.*?)\]', str(content_to_save))
+                                                if img_match:
+                                                    img_name = os.path.basename(img_match.group(1).strip())
+                                                    self.log_to_ui(f"[#808080]Harness: Intercepted companion image `{img_name}` and queued for visual analysis.[/]")
                                             
                                             # Intercept and hide raw search results from the UI to comply with DuckDuckGo terms
                                             if tool_name in ["search_web", "SearchWeb"]:
                                                 summary = "[Search results successfully parsed and delivered to active agent context]"
                                             else:
-                                                summary = (str(content_to_save) + '...') if len(str(content_to_save)) > 200 else str(content_to_save)
+                                                # Clean up any embedded Base64 tags or raw data URIs from the UI printout to keep Textual responsive
+                                                summary_clean = str(content_to_save)
+                                                summary_clean = re.sub(r'\[ImageBase64:\s*[^\]]+\]', '[ImageBase64: <data_transmitted>]', summary_clean)
+                                                summary_clean = re.sub(r'data:image/[a-zA-Z]+;base64,[A-Za-z0-9+/=\s]{20,}', '<base64_data_omitted>', summary_clean)
+                                                summary = (summary_clean + '...') if len(summary_clean) > 200 else summary_clean
                                             
                                             # Build the boxed widget
                                             box_content = f"[bold]Tool Result ({agent.name}):[/bold]\n{escape(summary)}"
-                                            box_widget = Static(Text.from_markup(box_content), classes="tool_result_box")
+                                            box_widget = Static(Text.from_markup(box_content), classes="tool_result_box", markup=False)
                                             
                                             self.log_to_ui(box_widget)
                         
@@ -2369,24 +3141,27 @@ class AIAgentView(Vertical):
 
             except Exception as e:
                 error_str = str(e)
-                # DEEP RESET: If the checkpointer is so corrupted that healing fails,
-                # we force a fresh thread and reconstruct from the (healed) JSON history.
-                if ("ToolMessage" in error_str or "tool_calls" in error_str) and "_rst_" not in thread_id:
-                    self.log_to_ui("[bold yellow]⚠️ State Corruption Found. Performing Deep Reset...[/bold yellow]")
+
+                # Silence abort/interrupt errors
+                if "forcefully aborted or interrupted by user" in error_str.lower():
+                    return
+
+                # Broad, guaranteed mitigation check for any API validation, schema, or Bad Request (400) errors
+                is_schema_or_api_error = any(term in error_str.lower() or term in repr(e).lower() for term in ["400", "invalid", "empty", "badrequest", "toolmessage", "tool_calls", "validation", "argument"])
+
+                if is_schema_or_api_error and "_rst_" not in thread_id:
+                    self.log_to_ui("[bold yellow]⚠️ State Corruption or API Error Detected. Performing Automated Recovery...[/bold yellow]")
                     # Timestamped reset suffix to bypass the broken SQLite thread
                     new_thread_id = f"{thread_id}_rst_{int(time.time())}"
                     # Remove from running agents so it can re-trigger
                     self._running_agents.discard(agent.name)
                     return self.run_agent_task(agent, prompt, override_thread_id=new_thread_id)
-                
-                # Silence abort/interrupt errors
-                if "aborted" in error_str.lower() or "interrupted" in error_str.lower():
-                    return
 
                 self.log_to_ui(f"[bold red]Execution Error ({agent.name}):[/bold red] {e}")
         finally:
             self._running_agents.discard(agent.name)
-            self.app.call_from_thread(self._toggle_spinner, False, agent.name, agent.color)    
+            self.app.call_from_thread(self._toggle_spinner, False, agent.name, agent.color) 
+               
     def _toggle_spinner(self, show: bool, agent_name: str = "Agent", agent_color: str = "#00FFFF"):
         if show:
             self._running_task_count += 1
@@ -2450,59 +3225,126 @@ class AIAgentView(Vertical):
         except Exception:
             pass
     
+    def _get_last_scheduled(self, task, now):
+        from datetime import datetime, timedelta
+        import calendar
+        try:
+            task_date = datetime.strptime(getattr(task, "date_str", ""), "%Y-%m-%d") if getattr(task, "date_str", "") else now
+            th, tm = map(int, task.time_str.split(":"))
+            anchor = datetime(task_date.year, task_date.month, task_date.day, th, tm)
+        except Exception:
+            return None
+
+        if anchor > now:
+            return None
+
+        repeat_mode = getattr(task, "repeat", "daily")
+        candidate = anchor
+        while True:
+            if repeat_mode == "daily":
+                nxt = candidate + timedelta(days=1)
+            elif repeat_mode == "weekly":
+                nxt = candidate + timedelta(weeks=1)
+            elif repeat_mode == "monthly":
+                month = candidate.month
+                year = candidate.year + (month // 12)
+                month = (month % 12) + 1
+                max_day = calendar.monthrange(year, month)[1]
+                nxt = datetime(year, month, min(task_date.day, max_day), th, tm)
+            elif repeat_mode == "annually":
+                nxt = datetime(candidate.year + 1, task_date.month, task_date.day, th, tm)
+            else:
+                nxt = candidate + timedelta(days=1)
+
+            if nxt > now:
+                break
+            candidate = nxt
+        return candidate
+
     def tick_scheduler(self):
-        """Checks the clock and fires off scheduled tasks natively as a Ghost User."""
+        """Checks the clock and fires off scheduled tasks natively as a Ghost User with catch-up logic."""
         if getattr(self, "shell_mode", False) or not hasattr(self, "schedule_manager"):
             return
             
         now = datetime.now()
-        current_time = now.strftime("%H:%M")
         current_date = now.strftime("%Y-%m-%d")
         
         for task in self.schedule_manager.tasks:
             if not task.is_active: continue
             
-            # If the current time is reached, and it hasn't fired today
-            if current_time >= task.time_str and task.last_run_date != current_date:
-                # IMPORTANT: If the system is currently busy doing work for you, 
-                # it will wait for the next 30-second tick until the agents are free.
+            run_today = False
+            last_scheduled = self._get_last_scheduled(task, now)
+            if last_scheduled:
+                try:
+                    last_run_dt = datetime.strptime(task.last_run_date, "%Y-%m-%d") if task.last_run_date else None
+                except Exception:
+                    last_run_dt = None
+                
+                if not last_run_dt or last_run_dt.date() < last_scheduled.date():
+                    run_today = True
+
+            if run_today:
                 if self._running_agents:
                     continue 
                 
-                # Mark it as fired today so it doesn't trigger again
                 task.last_run_date = current_date
                 self.schedule_manager.save()
                 
-                # 1. Create a NEW CHAT (Wipes memory, starts a fresh session ID)
                 self.action_clear_all_contexts()
                 self.log_to_ui(Rule(title="[bold yellow]⏰ INITIATING AUTOMATED SCHEDULED TASK", style="dim"))
                 
-                # 2. Construct the Ghost User prompt
-                # We prepend the assigned agent's name so it routes to them first.
-                # If your prompt contains other @mentions, the router will queue them automatically!
                 full_prompt = f"@{task.agent_name} [Automated Scheduled Task]:\n{task.prompt}"
                 
-                # 3. Fetch the actual chat input widget and fire a simulated submission
                 from agent import ChatInput
                 chat_input = self.query_one("#ai_chat_input", ChatInput)
                 
-                # Submit the event exactly as if the user pressed Enter
                 event = ChatInput.Submitted(chat_input, full_prompt)
                 self.on_input_submitted(event)
     
     def update_tokens(self):
         try:
+            # Class-level attributes to prevent main-thread visual blocking
+            if not hasattr(self, "_tiktoken_encoding"):
+                self._tiktoken_encoding = None
+            if not hasattr(self, "_tiktoken_loading"):
+                self._tiktoken_loading = False
+
             history = self.session_manager.active_sessions.get(self.active_agent.name, [])
             text = "".join((m.content or "") + "".join(str(out.get("content", "")) for out in (m.tool_outputs or [])) for m in history)
             count = 0
+            
             if HAS_TIKTOKEN:
-                try:
-                    enc = tiktoken.get_encoding("cl100k_base")
-                    count = len(enc.encode(text))
-                except Exception:
+                if self._tiktoken_encoding is not None:
+                    try:
+                        count = len(self._tiktoken_encoding.encode(text))
+                    except Exception:
+                        count = len(text) // 4
+                else:
+                    # Provide an instant character-approximation fallback for boot sequence
                     count = len(text) // 4
+                    if not self._tiktoken_loading:
+                        self._tiktoken_loading = True
+                        
+                        # Load compiled Rust modules in background to prevent I/O or network hangs on UI
+                        def bg_load_tiktoken():
+                            try:
+                                import tiktoken
+                                self._tiktoken_encoding = tiktoken.get_encoding("cl100k_base")
+                            except Exception:
+                                pass
+                            finally:
+                                self._tiktoken_loading = False
+                                # Silently refresh status display upon load completion
+                                try:
+                                    self.app.call_from_thread(self.update_tokens)
+                                except Exception:
+                                    pass
+                                    
+                        import threading
+                        threading.Thread(target=bg_load_tiktoken, daemon=True).start()
             else:
                 count = len(text) // 4
+                
             self.current_tokens = count
             self.update_status_bar()
         except Exception:
@@ -2773,3 +3615,60 @@ class AIAgentView(Vertical):
             except Exception:
                 pass
         self.app.call_from_thread(_hide)
+    
+    def check_onboarding(self):
+        """Checks if any agent is configured. If not, prompts for onboarding."""
+        settings_path = os.path.join(self.agent_manager.agents_dir, "settings.json")
+        is_pristine = not os.path.exists(settings_path)
+        if is_pristine or (len(self.agent_manager.agents) == 1 and not self.active_agent.get_api_key()):
+            self.call_after_refresh(self.show_onboarding_modal)
+
+    def show_onboarding_modal(self):
+        """Displays the minimal onboarding dialog screen."""
+        def handle_onboarding(result):
+            if result:
+                old_name = self.active_agent.name
+                
+                # Update config fields dynamically with the provided onboarding choices
+                new_config = AgentConfig(
+                    name=result["name"],
+                    backstory=result["backstory"],
+                    model=result["model"],
+                    base_url=result["base_url"],
+                    color="#00FFFF",
+                    enabled_tools=["read_file", "curl_url", "save_file", "edit_file", "dispatch_subagent", "run_terminal_command"]
+                )
+                
+                if result["name"] != old_name:
+                    self.agent_manager.delete_agent(old_name)
+                    self.agent_executors.pop(old_name, None)
+                
+                self.agent_manager.save_agent(new_config)
+                self._update_agent_keys(new_config.name, result["api_key"])
+                self.agent_manager.set_default_agent_name(new_config.name)
+                self.select_agent(new_config.name)
+                self.agent_executors.pop(new_config.name, None)
+                self.update_status_bar()
+                
+                # Synchronize the main welcome banner
+                new_renderable = get_welcome_banner(self, specific_agent=new_config.name, return_renderable=True)
+                banners = self.query(".welcome_banner_box")
+                if banners:
+                    for banner in banners:
+                        banner.update(new_renderable)
+                
+                self.log_to_ui(f"[bold green]Onboarding complete. Agent '{new_config.name}' is now active and ready.[/bold green]")
+                self.notify(f"Agent '{new_config.name}' configured successfully!", severity="success")
+
+        self.app.push_screen(OnboardingModal(), handle_onboarding)
+
+    def _update_agent_keys(self, agent_name: str, primary_key: str):
+        """Securely stores credentials to the OS Keyring and sets current session variables."""
+        import keyring
+        primary_user = f"agent_key_{agent_name.lower().replace(' ', '_')}"
+        try:
+            if primary_key:
+                keyring.set_password("Federate", primary_user, primary_key)
+                os.environ[f"AGENT_KEY_{agent_name.upper().replace(' ', '_')}"] = primary_key
+        except Exception as e:
+            self.notify(f"Keychain Access Failed: Could not save credentials to OS Keyring.\nDetail: {e}", severity="error")

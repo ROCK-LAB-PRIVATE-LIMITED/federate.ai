@@ -6,6 +6,7 @@ import re
 import queue
 import threading
 import urllib.request
+import urllib.error
 import collections
 import numpy as np
 
@@ -35,6 +36,120 @@ from textual.screen import ModalScreen
 from textual import on
 
 AUDIO_CONFIG_FILE = "audio_config.json"
+FEDERATE_DIR = os.path.join(os.path.expanduser("~"), ".federate")
+_DOWNLOAD_LOCK = threading.Lock()
+
+def _download_file(url: str, dest_path: str, log_cb=None, max_retries=3):
+    # Ensure absolute path and define temporary part file
+    dest_path = os.path.abspath(dest_path)
+    filename = os.path.basename(dest_path)
+    part_path = dest_path + ".part"
+
+    # Helper function for logging
+    def log_msg(msg, style="dim yellow"):
+        formatted = f"[{style}]{msg}[/{style}]"
+        if log_cb:
+            log_cb(formatted)
+        else:
+            try:
+                from toolbox import log_tool
+                log_tool(formatted)
+            except ImportError:
+                print(msg)
+
+    # Helper function for Textual UI notifications
+    def ui_notify(msg, title="Information", severity="information"):
+        try:
+            from toolbox import CURRENT_APP
+            if CURRENT_APP:
+                CURRENT_APP.call_from_thread(
+                    CURRENT_APP.notify, 
+                    msg, 
+                    title=title, 
+                    severity=severity,
+                    timeout=3.0
+                )
+        except Exception:
+            pass
+
+    with _DOWNLOAD_LOCK:
+        # 1. Fetch remote file size to verify integrity
+        expected_size = 0
+        try:
+            req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                expected_size = int(resp.headers.get('Content-Length', 0))
+        except Exception:
+            pass # Server might block HEAD requests, proceed anyway
+
+        # 2. Check if file already exists and is fully downloaded
+        if os.path.exists(dest_path):
+            if expected_size > 0:
+                local_size = os.path.getsize(dest_path)
+                if local_size == expected_size:
+                    return # Fully downloaded, nothing to do
+                else:
+                    log_msg(f"Incomplete file detected: {filename} ({local_size}/{expected_size} bytes). Redownloading...", "dim yellow")
+            else:
+                return # Cannot verify size, assume existing file is fine
+
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+
+        # 3. Download with Retries, Progress Tracking, and Chunking
+        for attempt in range(1, max_retries + 1):
+            try:
+                log_msg(f"⏳ Downloading model: {filename} (Attempt {attempt}/{max_retries})...")
+                if attempt == 1:
+                    ui_notify(f"Starting download for {filename}...", title="Model Download")
+                
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    total_size = int(response.headers.get('Content-Length', 0))
+                    block_size = 65536  # 64KB chunks for stability/speed
+                    downloaded = 0
+                    last_notified = -10 # Ensure 0% gets logged immediately
+                    
+                    with open(part_path, 'wb') as f:
+                        while True:
+                            buffer = response.read(block_size)
+                            if not buffer:
+                                break
+                            f.write(buffer)
+                            downloaded += len(buffer)
+                            
+                            # Calculate and report progress
+                            if total_size > 0:
+                                progress = int((downloaded / total_size) * 100)
+                                if progress >= last_notified + 10:
+                                    mb_dl = downloaded / (1024 * 1024)
+                                    mb_tot = total_size / (1024 * 1024)
+                                    p_msg = f"{filename}: {progress}% ({mb_dl:.1f}MB / {mb_tot:.1f}MB)"
+                                    
+                                    log_msg(f"⏳ {p_msg}")
+                                    ui_notify(p_msg, title="Downloading...")
+                                    last_notified = progress
+                                    
+                    # Verify download didn't drop before finishing
+                    if total_size > 0 and downloaded < total_size:
+                        raise urllib.error.URLError(f"Connection interrupted. Downloaded {downloaded} of {total_size} bytes.")
+                
+                # 4. Atomic rename - rename .part to final file only if fully successful
+                os.replace(part_path, dest_path)
+                
+                log_msg(f"✅ Finished downloading {filename}", "dim green")
+                ui_notify(f"Successfully downloaded {filename}!", title="Download Complete", severity="success")
+                return # Exit on success
+                
+            except Exception as e:
+                log_msg(f"❌ Error downloading {filename}: {e}", "bold red")
+                if attempt == max_retries:
+                    if os.path.exists(part_path):
+                        try: os.remove(part_path)
+                        except: pass
+                    ui_notify(f"Failed to download {filename}: {e}", title="Download Failed", severity="error")
+                    raise e
+                
+                time.sleep(2) # Wait 2 seconds before retrying
 
 def load_audio_config():
     default_config = {
@@ -183,8 +298,13 @@ class TTSManager:
     def load_model(self):
         if not Kokoro or not sd: return
         if not self.model:
-            model_path = os.path.join(REPO_DIR, "kokoro-v1.0.onnx")
-            voices_path = os.path.join(REPO_DIR, "voices-v1.0.bin")
+            model_path = os.path.join(FEDERATE_DIR, "kokoro-v1.0.onnx")
+            voices_path = os.path.join(FEDERATE_DIR, "voices-v1.0.bin")
+            try:
+                _download_file("https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx", model_path)
+                _download_file("https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin", voices_path)
+            except Exception:
+                return
             self.model = Kokoro(model_path, voices_path)
 
     def stop_all_audio(self):
@@ -334,7 +454,14 @@ class STTManager:
             raise ImportError("sherpa-onnx or sounddevice is not installed.")
             
         if not self.whisper_recognizer:
-            whisper_dir = os.path.join(REPO_DIR, "sherpa-onnx-whisper-tiny.en")
+            whisper_dir = os.path.join(FEDERATE_DIR, "sherpa-onnx-whisper-tiny.en")
+            try:
+                _download_file("https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-encoder.onnx", os.path.join(whisper_dir, "tiny.en-encoder.onnx"), self.log_callback)
+                _download_file("https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-decoder.onnx", os.path.join(whisper_dir, "tiny.en-decoder.onnx"), self.log_callback)
+                _download_file("https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-tokens.txt", os.path.join(whisper_dir, "tiny.en-tokens.txt"), self.log_callback)
+            except Exception as e:
+                raise RuntimeError(f"Failed to load Whisper STT model files: {e}")
+                
             self.whisper_recognizer = sherpa_onnx.OfflineRecognizer.from_whisper(
                 encoder=f"{whisper_dir}/tiny.en-encoder.onnx",
                 decoder=f"{whisper_dir}/tiny.en-decoder.onnx",
@@ -343,7 +470,15 @@ class STTManager:
             )
             
         if not self.trigger_recognizer and self.mode == "hotword":
-            model_dir = os.path.join(REPO_DIR, "sherpa-onnx-streaming-zipformer-en-2023-02-21")
+            model_dir = os.path.join(FEDERATE_DIR, "sherpa-onnx-streaming-zipformer-en-2023-02-21")
+            try:
+                _download_file("https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-02-21/resolve/main/tokens.txt", os.path.join(model_dir, "tokens.txt"), self.log_callback)
+                _download_file("https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-02-21/resolve/main/encoder-epoch-99-avg-1.int8.onnx", os.path.join(model_dir, "encoder-epoch-99-avg-1.int8.onnx"), self.log_callback)
+                _download_file("https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-02-21/resolve/main/decoder-epoch-99-avg-1.int8.onnx", os.path.join(model_dir, "decoder-epoch-99-avg-1.int8.onnx"), self.log_callback)
+                _download_file("https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-02-21/resolve/main/joiner-epoch-99-avg-1.int8.onnx", os.path.join(model_dir, "joiner-epoch-99-avg-1.int8.onnx"), self.log_callback)
+            except Exception as e:
+                raise RuntimeError(f"Failed to load streaming hotword transducer model files: {e}")
+                
             self.trigger_recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
                 tokens=f"{model_dir}/tokens.txt",
                 encoder=f"{model_dir}/encoder-epoch-99-avg-1.int8.onnx",

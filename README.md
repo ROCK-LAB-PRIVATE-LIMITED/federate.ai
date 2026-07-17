@@ -1,39 +1,42 @@
 # Federate
 
-Federate is a cross-platform, terminal-based **peer to peer** AI orchestration and universal automation system. 
+Federate is a cross-platform, terminal-based **peer to peer** AI orchestration harness and universal automation system. 
 
 It turns your terminal into an interactive workbench where you can run specialized teams of AI agents who talk to and collaborate with each other, use voice input and output, execute desktop automation commands, and much more.
 
 ---
+<p align="center">
+  <img src="album_art.png" alt="Federate Logo" width="100%" />
+</p>
 
 ## What Makes Federate Different?
 
 ### 1. Orchestration Freedom
-Most multi-agent frameworks force you to write rigid, complex Python graphs and state-machine code to define how agents interact. Federate replaces this overhead with simple prompt driven system. 
-
 You organize your team of agents **simply by writing their backstories**. Describe how they relate to one another, and Federate builds the communication network dynamically. You can create:
 * **A true Peer-to-Peer hierarchy where every agent is equal to every other agent.** This is the default and exclusive to Federate. No other agentic system does this as of date (2nd July 2026). We are the first to implement it (though many will likely follow suit).
 * A strict corporate hierarchy or military style chain-of-command.
 * A collaborative Hub-and-Spoke swarm.
 * Anything else you can think of.
 
-### 2. Multi-Model, Cross-Provider Collaboration
 Federate supports a true multi-model ecosystem. Because it abstracts the underlying LLM provider, you can bring different models into the same session. You can easily watch **ChatGPT and Gemini debate** a technical architecture decision, a code optimization, or a creative writing prompt directly inside your terminal window.
 
-### 3. Native Desktop Vision & Speech (Computer Only)
-On desktop machines, agents can physically interact with your computer, listen for input and also talk back to you, using any model not just those with speech understanding or synthesis baked in.
+### 2. Active Skills
+While we support markdown based skills, Federate debuts the 'active skill' system where actual programs are stored and executed by agents on demand. This allows automation of almost anything you can think of. There is Visual Computer Usage ability for automating tasks requiring GUI interaction.
 
-### 4. Pocket-Sized Software Engineering
+### 3. Native Desktop Vision & Speech
+On desktop machines, agents can physically interact with your computer, listen for input and also talk back to you, using any model (not just those with speech understanding or synthesis baked in). Speech to text with hotword detection results in true hands free operation. Text to speech with different voice for each agent results in immerrssive role-play.
+
+### 4. First Class support for Termux
 Even on mobile, you can delegate complex multi-step coding tasks to an autonomous sub-agent. The system spawns an isolated local git worktree, writes and edits code, runs your local tests, and presents you with a clean commit diff to approve—ensuring your active development workspace remains untouched. Did you know your old Android can compile Rust?
 
 ---
 
 ## Feature Checklist
 
-* **Context Injection (`&`):** Type `&` followed by a file or directory (e.g., `&src/app.py` or `&src/`) to instantly parse and inject that code directly into your prompt.
+* **File and Folder attachments (`&`):** Type `&` followed by a file or directory (e.g., `&src/app.py` or `&src/`) to attach that file or folder directly into your prompt.
 * **Direct Shell Passthrough (`!`):** Type `!` followed by a command (e.g., `!git diff`) to run it in your local workspace and feed the output to the AI.
 * **Integrated Text IDE:** Press `F6` to instantly toggle between the chat view, a local file tree, a code editor with symbol outline, and an execution dashboard.
-* **And a lot more:** Offline Persistent memory with semantic search, goal management, skills (passive and active skills, the latter again a Federate exclusive as on date), speech to text, text to speech, research orchestration, computer use, telegram integration, task scheduling etc already baked in, more features might be added in the future.
+* **And a lot more:** Offline Persistent memory with semantic search, goal management, skills (passive and active skills, the latter again a Federate exclusive as on date), speech to text, text to speech, deep research with illustrated pdf generation, computer use, telegram integration, task scheduling etc already baked in, more features might be added in the future.
 ---
 
 ## Installation
@@ -69,7 +72,7 @@ To protect your workspace, the system boots in **SAFE (PLAN)** mode. In this mod
   * **FULL-AUTO:** Agents can run autonomous toolchains in the background.
 
 ### Command Reference
-* **Inject Files:** Type `&` followed by the file path (e.g., `&src/main.py`). Use **`UP/DOWN`** arrow keys to cycle through autocomplete suggestions.
+* **Attach Files and Folders:** Type `&` followed by the file path (e.g., `&src/main.py`). Use **`UP/DOWN`** arrow keys to cycle through autocomplete suggestions.
 * **Mention Agents:** Type `@` followed by the agent name to route your message to a specific agent. Use `@team` to broadcast to everyone, or `@room` to talk to agents active in the current session. **Agents can also use @ to invoke other agents,** which is the core of the peer to peer system.
 * **Key Bindings:**
   * **`F2`**: Session Manager (Create a new chat or load historical multi-agent sessions)
@@ -81,13 +84,12 @@ To protect your workspace, the system boots in **SAFE (PLAN)** mode. In this mod
   * **`Ctrl+A`**: **ABORT** (Emergency stop for any running AI tasks or terminal commands)
   * **`Ctrl+Q`**: Quit Federate
 
-### Statutory Warning
-* Federate contains full unrestricted code/command execution capabilities. This lets you hand full control of the device to the agent(s) running. This includes the ability to run potentially destructive code/commands. It is recommended to run it on a spare machine that contains no sensitive/valuable data and one that you do not mind wiping and resetting from time to time.
-* AI systems inherently navigate a trade-off between capability and safety; **Federate leans heavily toward the capability aspect.** For safe and secure coding with AI assistance, please consider using [***KittySuite IDE***](https://www.rocklab.in/kittysuite), where the AI does not have the capability to execute code, run commands, or read files you don't explicitly share.
+### Disclaimer
+* All AI systems inherently navigate a trade-off between capability and safety; **Federate leans heavily toward the capability aspect.** For safe and secure coding with AI assistance, please consider using [***KittySuite IDE***](https://www.rocklab.in/kittysuite), where the AI does not have the capability to execute code, run commands, or read files you don't explicitly share.
 
 ## Why We Built Federate
 
-In many underprivileged regions of the developing world, owning a desktop computer is often a luxury, yet nearly everyone has access to a smartphone. Federate is written to bring the joy of programming to those pocket-sized screens. It is designed to run natively and comfortably inside **Termux on Android**, transforming a sub-$100 smartphone into a fully capable engineering workstation.
+In many regions of the developing world, owning a desktop computer is often a luxury, yet nearly everyone has access to a smartphone. Federate is written to bring the joy of programming to those pocket-sized screens. It is designed to run natively and comfortably inside **Termux on Android**, transforming a spare smartphone into a fully capable engineering workstation.
 
 But Federate is also built for the most advanced power-users on high-end hardware. It runs on **any Mac or PC** you can throw at it, unlocking system-level features like desktop automation, local speech-to-text with hotword detection, and text-to-speech voice generation. 
 

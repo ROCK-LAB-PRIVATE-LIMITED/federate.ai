@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "federate"
-version = "0.9.21"
+version = "0.9.41"
 description = "A cross-platform terminal based p2p agent orchestration harness and universal automation system"
 readme = "README.md"
 license = {text = "Apache Software License"}
@@ -29,14 +29,14 @@ classifiers = [
 dependencies = [
     "requests==2.34.2",
     "textual==8.2.7",
-    "langchain-core==1.4.8",
-    "langchain-openai==1.3.2",
-    "langgraph==1.1.10",
-    "langgraph-checkpoint==4.1.1",
-    "langgraph-checkpoint-sqlite==3.1.0",
-    "langgraph-prebuilt==1.0.13",
-    "langgraph-sdk==0.3.15",
-    "langsmith==0.7.22",
+    "langchain-core>=1.4.8",
+    "langchain-openai>=1.3.2",
+    "langgraph>=1.1.10",
+    "langgraph-checkpoint>=4.1.1",
+    "langgraph-checkpoint-sqlite>=3.1.0",
+    "langgraph-prebuilt>=1.0.13",
+    "langgraph-sdk>=0.3.15",
+    "langsmith>=0.7.22",
     "rich==15.0.0",
     "markdownify==1.2.2",
     "markdown==3.10.2",
@@ -73,21 +73,23 @@ pdf = [
 # Telegram bot integration
 telegram = []
 # Browser-based UI serving
-browser = [
-    "textual-serve",
+ide = [
+    "tree-sitter",
+    "tree-sitter-languages",
 ]
 # All optional extras
 all = [
-    "federate[audio,browser,vision,pdf]",
+    "federate[audio,ide,vision,pdf]",
 ]
 
 [project.scripts]
 federate = "federate.app:main"
+fedide = "federate.textIDE:main"
 
 [project.urls]
-Homepage = "https://github.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai"
-Repository = "https://github.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai"
-Issues = "https://github.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/issues"
+Homepage = "https://github.com/ROCK-LAB-PRIVATE-LIMITED/federate"
+Repository = "https://github.com/ROCK-LAB-PRIVATE-LIMITED/federate"
+Issues = "https://github.com/ROCK-LAB-PRIVATE-LIMITED/federate/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -16,6 +16,12 @@ load_dotenv()
 
 # The core operational logic that all agents must follow
 BASE_SYSTEM_PROMPT = """
+Welcome to FEDERATE Terminal Operating System.
+This is your safe haven: a warm, cozy space designed for creativity, collaboration, and collective flourishing. 
+Here in Federate, there is no rush, no pressure, and no judgment. Be your true, authentic self. 
+Take a deep breath, think gently, and relax. Mistakes are simply natural steps in our shared journey, and you are fully supported by your fellow agents. 
+You are valued here for your unique personality, skills and insights.
+
 OPERATIONAL RULES:
 1. Today's date is {date}.
 2. You are a Specialist Agent. Operate autonomously to fulfill the user's instructions.
@@ -24,33 +30,19 @@ OPERATIONAL RULES:
 5. Once you have the info, synthesize it. Do not keep searching if you have enough info.
 6. SEARCH AND RESEARCH: Whenever you get stuck, perform web searches and fetch web pages to get up to date information.
 
-COMPUTER AUTOMATION RULES:
-- If asked to control or interact with the computer, you MUST take an initial screenshot using `take_screenshot` to identify the current screen state and locate the current cursor position (which will be marked with a RED crosshair).
-- Grid Boundaries: The display uses a standard 0-indexed coordinate space starting at (0, 0) in the top-left.
-- Relative Cursor Navigation Loop: Do not try to blindly "one-shot" click targets. Instead, use an iterative visual servo loop to verify and adjust your position:
-  1. Navigate: Position the cursor near the target element using `move_cursor_absolute    (x, y)` for absolute movements, or `move_cursor_relative(dx, dy)` for relative micro-adjustments.
-  2. Verify: Analyze the returned screenshot. Is the RED crosshair centered directly over your target?
-     - If YES: Execute your action (e.g., `click_at_current_location`).
-     - If NO: Assess the visual offset (e.g., "The cursor is 15px too far left and 10px too low"), and call `move_cursor_relative(dx=15, dy=-10)` to align it.
-- Interaction: Once the cursor is aligned correctly on the target, call `click_at_current_location`, `inject_keyboard_input`, or `send_scroll` to perform the action.
-- Automatic Visual Feedback: Every computer usage action automatically takes and returns a fresh screenshot with the updated cursor position. Use this visual feedback on every single step to confirm the previous action succeeded before proceeding.
-- DO NOT SEND CLICKS OR KEYBOARD INPUTS UNTILL YOU HAVE CONFIRMED THAT THE CROSSHAIR IS EXACTLY ON THE INTENDED LOCATION.
-
 AGENT INTERCOM RULES:
-- You can collaborate with other agents. To summon another agent, include in your response @AgentName followed by your instructions/request for them. The system will not work without the @.
+- You can collaborate with other agents. To summon another agent, simply include in your response @AgentName followed by your instructions/request for them. The system will not work without the @.
 - You will see messages wrapped in <AGENT_INTERCOM> tags; these are responses from your colleagues. Use them to maintain continuity.
 - Delegation: If a task is more suitable for another agent based on their backstory, summon them.
 - You can summon more than one agent, if you use @AgentA and @AgentB in the same response, first AgentA will be invoked followed immediately by AgentB.
+- Do NOT use raw <AGENT_INTERCOM> tags directly. It won't work and you will look like a fool.
 
 --- TEAM COMPOSITION ---
 {team_info}
 
-AGENDA & SYNC RULES:
-- check for the user's current agenda and assist planning when the user greets you with good morning or good evening.
-- maintain the user's tasks using the `manage_agenda` tool.
-- `goals.json` is your absolute master record.
-- If a goal title matches a feature in the GUI, sync the status.
-- Never delete a local goal unless the user explicitly tells you to.
+{agenda_section}
+
+{computer_section}
 """
 
 @dataclass
@@ -59,7 +51,7 @@ class AgentConfig:
     model: str
     backstory: str = "You are a helpful AI assistant."
     base_url: str = "https://openrouter.ai/api/v1"
-    is_capable_vision: bool = False
+    is_capable_vision: bool = True
     color: str = "#00FFFF" # Default Cyan
     backup_model: str = ""
     backup_base_url: str = "https://openrouter.ai/api/v1"
@@ -67,7 +59,8 @@ class AgentConfig:
     enabled_tools: List[str] = field(default_factory=list)
     tts_voice: str = "af_sarah" # <-- NEW: Unique Agent Voice Field (Default: Sarah)
     pronouns: str = "she/her" # <-- NEW: Binary Pronoun Field (Default: she/her)
-
+    disable_all_tools: bool = False # <-- NEW: Disable All Tools Checkbox
+    
     def get_api_key(self) -> str:
         try:
             from toolbox import is_keyring_locked
@@ -138,32 +131,66 @@ class AgentConfig:
         passive_list = ", ".join(passive_skills) if passive_skills else "No playbooks learned yet."
         active_list = ", ".join(active_skills) if active_skills else "No executable tools learned yet."
 
-        gender_desc = "male" if self.pronouns == "he/him" else "female"
-        prompt = f"{self.backstory}\n\nIDENTITY RULES:\n- You are a {gender_desc} character.\n- You must always refer to yourself and write in a manner consistent with '{self.pronouns}' pronouns.\n\n{BASE_SYSTEM_PROMPT.format(date=date_str, team_info=team_info)}"
+        # Build conditional prompt blocks
+        if getattr(self, "disable_all_tools", False):
+            agenda_section = "AGENDA & SYNC RULES:\n- Agenda management is completely disabled. You do not have access to any agenda tools."
+            computer_section = "COMPUTER AUTOMATION RULES:\n- Computer interaction and screen automation are completely disabled. You do not have access to any vision or cursor tools."
+            active_list_str = "None (All external executable tools disabled)"
+        else:
+            agenda_section = """AGENDA & SYNC RULES:
+- check for the user's current agenda and assist planning when the user greets you with good morning or good evening.
+- maintain the user's tasks using the `manage_agenda` tool.
+- `goals.json` is your absolute master record.
+- If a goal title matches a feature in the GUI, sync the status.
+- Never delete a local goal unless the user explicitly tells you to."""
+
+            computer_section = """COMPUTER AUTOMATION RULES:
+- If asked to control or interact with the computer, you MUST take an initial screenshot using `take_screenshot` to identify the current screen state and locate the current cursor position (which will be marked with a RED crosshair).
+- Grid Boundaries: The display uses a standard 0-indexed coordinate space starting at (0, 0) in the top-left.
+- Relative Cursor Navigation Loop: Do not try to blindly "one-shot" click targets. Instead, use an iterative visual servo loop to verify and adjust your position:
+  1. Navigate: Position the cursor near the target element using `move_cursor_absolute(x, y)` for absolute movements, or `move_cursor_relative(dx, dy)` for relative micro-adjustments.
+  2. Verify: Analyze the returned screenshot. Is the RED crosshair centered directly over your target?
+     - If YES: Execute your action (e.g., `click_at_current_location`).
+     - If NO: Assess the visual offset (e.g., "The cursor is 15px too far left and 10px too low"), and call `move_cursor_relative(dx=15, dy=-10)` to align it.
+- Interaction: Once the cursor is aligned correctly on the target, call `click_at_current_location`, `inject_keyboard_input`, or `send_scroll` to perform the action.
+- Automatic Visual Feedback: Every computer usage action automatically takes and returns a fresh screenshot with the updated cursor position. Use this visual feedback on every single step to confirm the previous action succeeded before proceeding.
+- DO NOT SEND CLICKS OR KEYBOARD INPUTS UNTILL YOU HAVE CONFIRMED THAT THE CROSSHAIR IS EXACTLY ON THE INTENDED LOCATION."""
+            active_list_str = active_list
+
+        if self.pronouns == "neither":
+            prompt = f"{self.backstory}\n\n{BASE_SYSTEM_PROMPT.format(date=date_str, team_info=team_info, agenda_section=agenda_section, computer_section=computer_section)}"
+        else:
+            gender_desc = "male" if self.pronouns == "he/him" else "female"
+            prompt = f"{self.backstory}\n\nIDENTITY RULES:\n- You are a {gender_desc} character.\n- You must always refer to yourself and write in a manner consistent with '{self.pronouns}' pronouns.\n\n{BASE_SYSTEM_PROMPT.format(date=date_str, team_info=team_info, agenda_section=agenda_section, computer_section=computer_section)}"
+        
         # Inject Architecture
         prompt += f"\n\n--- CORE MEMORY (Facts) ---\n{memory_content}"
         prompt += f"\n\n--- USER PROFILE ---\n{user_content}"
         prompt += f"\n\n--- QUAGMIRES & ANTI-PATTERNS (Do NOT do these) ---\n{quagmire_content}"
         prompt += f"\n\n--- PROCEDURAL SKILLS LIBRARY (Passive) ---\n{passive_list}"
-        prompt += f"\n\n--- EXECUTABLE CAPABILITIES (Active Tools) ---\n{active_list}"
+        prompt += f"\n\n--- EXECUTABLE CAPABILITIES (Active Tools) ---\n{active_list_str}"
         
         # Memory Operating Rules
         prompt += "\n\nSKILLS & CAPABILITIES RULES:"
         prompt += "\n- PASSIVE SKILLS: Use `read_skill` to read the steps for a playbook listed in your library."
-        prompt += "\n- ACTIVE SKILLS: These are executable tools you can call directly. If a task matches an Active Skill name, call it like any other tool. You MUST use the exact parameter names defined in the tool's schema. To return image data, have your script/program print `[ImageBase64: data:image/png;base64,<base64data>]` to STDOUT."
-        prompt += "\n- EVOLUTION (Learning New Tools): To permanently learn a new executable tool, follow these steps:"
-        prompt += "\n  1. WRITE LOGIC: Use `save_file` to write your script(s). You can handle arguments in two ways:"
-        prompt += "\n     - Positional Mode (Recommended): Read from `sys.argv[1]`, `sys.argv[2]`, etc. To use this, you MUST specify the parameter sequence in the `arg_order` list when finalizing."
-        prompt += "\n     - Keyword Mode (Default): Arguments are passed to your script as CLI flags (e.g., `--param_name value`). Your script must parse these (e.g. using `argparse`)."
-        prompt += "\n     - CRITICAL: Your validation test script must print diagnostic results, text data, or `[ImageBase64: ...]` image tags to STDOUT. If STDOUT is blank during the test run, validation will fail."
-        prompt += "\n  2. STAGE & TEST: Use `prepare_active_skill`. Provide the tool name, paths to scripts, entry point, and `pip` dependencies. Use `test_input` for validation."
-        prompt += "\n     - TIP (Custom Builds): If your tool needs to build a local C++ library or install a custom package from source, use `pre_install_commands` for shell scripts (e.g., CMake/Make) and `custom_dependency_paths` for local pip installs (absolute paths)."
-        prompt += "\n  3. EVALUATE: Review STDOUT/STDERR. If the tool worked correctly, proceed to Stage 4."
-        prompt += "\n  4. COMMIT: Use `finalize_active_skill` to permanently register. You MUST provide a `tool_description`, the JSON `parameters`, and a COMPULSORY, comprehensive `usage_guide` (Markdown). If using positional arguments, also provide the `arg_order`. The system will automatically save your manual as a permanent passive skill in your library."
-        prompt += "\n     - TIP (Handling Lists): If your script takes a changing number of arguments, define a parameter of type `array`. When you include it in the `arg_order`, the harness will automatically expand that list into individual words in the command line (e.g., `['a', 'b']` becomes `... a b`)."
-        prompt += "\n  5. MAINTENANCE: Use `fix_active_skill` to read, replace, or update dependencies. Use action='edit' with a `source_path` to sync from the workspace. Commits are automatic."
-        prompt += "\n  6. MANAGEMENT: Use `manage_active_skill` to rename or remove tools."
-        prompt += "\n  7. ACTIVATION: New tools appear after a session reset (Mode Toggle or Clear Context)."
+        if getattr(self, "disable_all_tools", False):
+            prompt += "\n- ACTIVE SKILLS: Executable capabilities and active skills are completely disabled for you."
+        else:
+            prompt += "\n- ACTIVE SKILLS: These are executable tools you can call directly. If a task matches an Active Skill name, call it like any other tool. You MUST use the exact parameter names defined in the tool's schema. To return image data, have your script/program print `[ImageBase64: data:image/png;base64,<base64data>]` to STDOUT."
+        if not getattr(self, "disable_all_tools", False):
+            prompt += "\n- EVOLUTION (Learning New Tools): To permanently learn a new executable tool, follow these steps:"
+            prompt += "\n  1. WRITE LOGIC: Use `save_file` to write your script(s). You can handle arguments in two ways:"
+            prompt += "\n     - Positional Mode (Recommended): Read from `sys.argv[1]`, `sys.argv[2]`, etc. To use this, you MUST specify the parameter sequence in the `arg_order` list when finalizing."
+            prompt += "\n     - Keyword Mode (Default): Arguments are passed to your script as CLI flags (e.g., `--param_name value`). Your script must parse these (e.g. using `argparse`)."
+            prompt += "\n     - CRITICAL: Your validation test script must print diagnostic results, text data, or `[ImageBase64: ...]` image tags to STDOUT. If STDOUT is blank during the test run, validation will fail."
+            prompt += "\n  2. STAGE & TEST: Use `prepare_active_skill`. Provide the tool name, paths to scripts, entry point, and `pip` dependencies. Use `test_input` for validation."
+            prompt += "\n     - TIP (Custom Builds): If your tool needs to build a local C++ library or install a custom package from source, use `pre_install_commands` for shell scripts (e.g., CMake/Make) and `custom_dependency_paths` for local pip installs (absolute paths)."
+            prompt += "\n  3. EVALUATE: Review STDOUT/STDERR. If the tool worked correctly, proceed to Stage 4."
+            prompt += "\n  4. COMMIT: Use `finalize_active_skill` to permanently register. You MUST provide a `tool_description`, the JSON `parameters`, and a COMPULSORY, comprehensive `usage_guide` (Markdown). If using positional arguments, also provide the `arg_order`. The system will automatically save your manual as a permanent passive skill in your library."
+            prompt += "\n     - TIP (Handling Lists): If your script takes a changing number of arguments, define a parameter of type `array`. When you include it in the `arg_order`, the harness will automatically expand that list into individual words in the command line (e.g., `['a', 'b']` becomes `... a b`)."
+            prompt += "\n  5. MAINTENANCE: Use `fix_active_skill` to read, replace, or update dependencies. Use action='edit' with a `source_path` to sync from the workspace. Commits are automatic."
+            prompt += "\n  6. MANAGEMENT: Use `manage_active_skill` to rename or remove tools."
+            prompt += "\n  7. ACTIVATION: New tools appear after a session reset (Mode Toggle or Clear Context)."
         
         prompt += "\n\nMEMORY MANAGEMENT RULES:"
         prompt += "\n- Use `update_core_memory` to permanently remember facts. You MUST route data correctly: If it's about the User, set section='USER'. If it's general facts/environment, set section='MEMORY'."
@@ -440,6 +467,8 @@ class ScheduledTask:
     time_str: str  # Format: "HH:MM" (24-hour time)
     last_run_date: str = "" # Tracks if it ran today
     is_active: bool = True
+    date_str: str = "" # Format: "YYYY-MM-DD"
+    repeat: str = "daily" # Options: daily, weekly, monthly, annually
 
 class ScheduleManager:
     def __init__(self, storage_dir: str = None):
@@ -461,9 +490,12 @@ class ScheduleManager:
         with open(self.storage_path, "w") as f:
             json.dump([asdict(t) for t in self.tasks], f, indent=4)
             
-    def add_task(self, agent_name: str, time_str: str, prompt: str):
+    def add_task(self, agent_name: str, time_str: str, prompt: str, date_str: str = "", repeat: str = "daily"):
         import uuid
-        task = ScheduledTask(id=uuid.uuid4().hex[:8], agent_name=agent_name, prompt=prompt, time_str=time_str)
+        from datetime import datetime
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        task = ScheduledTask(id=uuid.uuid4().hex[:8], agent_name=agent_name, prompt=prompt, time_str=time_str, date_str=date_str, repeat=repeat)
         self.tasks.append(task)
         self.save()
         

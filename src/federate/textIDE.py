@@ -1,5 +1,11 @@
 import os
 import sys
+
+# Ensure package directory is in sys.path to resolve absolute imports of submodules
+package_dir = os.path.dirname(os.path.abspath(__file__))
+if package_dir not in sys.path:
+    sys.path.insert(0, package_dir)
+
 import inspect
 import importlib
 from pathlib import Path
@@ -44,66 +50,132 @@ def get_ts_language(lang_name: str):
     if not HAS_TREESITTER or not lang_name: return None
     if lang_name in TS_LANG_CACHE: return TS_LANG_CACHE[lang_name] # Return cached
     
-    # 1. Try importing the tree_sitter_<lang> package
+    # 1. Try tree-sitter-languages (covers most common languages out of the box)
     try:
-        mod = importlib.import_module(f"tree_sitter_{lang_name}")
-        if hasattr(mod, "LANGUAGE"): lang = Language(mod.LANGUAGE())
-        elif hasattr(mod, "language"):
-            try: lang = Language(mod.language())
-            except TypeError: lang = Language(mod.language(), lang_name)
-        else: lang = None
+        from tree_sitter_languages import get_language
+        lang = get_language(lang_name)
         if lang:
             TS_LANG_CACHE[lang_name] = lang
             return lang
-    except (ImportError, Exception): pass
+    except (ImportError, Exception):
+        pass
 
-    # 2. Try loading from system-specific paths (e.g., Termux)
-    system_paths = [
-        f"/data/data/com.termux/files/usr/lib/tree_sitter/{lang_name}.so",
-        f"/usr/lib/tree_sitter/{lang_name}.so",
-        f"/usr/local/lib/tree_sitter/{lang_name}.so"
+    # 2. Try importing the individual Python-native package (e.g. tree-sitter-python)
+    try:
+        mod = importlib.import_module(f"tree_sitter_{lang_name}")
+        if hasattr(mod, "language"):
+            raw_lang = mod.language()
+        elif hasattr(mod, "LANGUAGE"):
+            raw_lang = mod.LANGUAGE()
+        else:
+            raw_lang = None
+            
+        if raw_lang:
+            # If raw_lang is already a Language object (modern tree-sitter >= 0.21.0),
+            # return it directly. Do not wrap it to prevent a TypeError.
+            if isinstance(raw_lang, Language):
+                lang = raw_lang
+            else:
+                try:
+                    lang = Language(raw_lang)
+                except (TypeError, Exception):
+                    try:
+                        lang = Language(raw_lang, lang_name)
+                    except Exception:
+                        lang = None
+        else:
+            lang = None
+            
+        if lang:
+            TS_LANG_CACHE[lang_name] = lang
+            return lang
+    except (ImportError, Exception): 
+        pass
+
+    # 3. Try loading from Termux/system-specific compiled packages as a final fallback
+    dirs = [
+        "/data/data/com.termux/files/usr/lib",
+        "/data/data/com.termux/files/usr/lib/tree_sitter",
+        "/usr/lib",
+        "/usr/lib/tree_sitter",
+        "/usr/local/lib",
+        "/usr/local/lib/tree_sitter"
     ]
-    for p in system_paths:
-        if os.path.exists(p):
-            try:
-                lib = ctypes.CDLL(p)
-                symbol_name = f"tree_sitter_{lang_name}"
-                if hasattr(lib, symbol_name):
-                    symbol = getattr(lib, symbol_name)
-                    symbol.restype = ctypes.c_void_p
-                    lang = Language(symbol())
-                    TS_LANG_CACHE[lang_name] = lang
-                    return lang
-            except Exception: pass
+    names = [
+        f"{lang_name}.so",
+        f"libtree-sitter-{lang_name}.so",
+        f"libtree_sitter_{lang_name}.so"
+    ]
+    for d in dirs:
+        for name in names:
+            p = os.path.join(d, name)
+            if os.path.exists(p):
+                try:
+                    lib = ctypes.CDLL(p)
+                    symbol_name = f"tree_sitter_{lang_name}"
+                    if hasattr(lib, symbol_name):
+                        symbol = getattr(lib, symbol_name)
+                        symbol.restype = ctypes.c_void_p
+                        lang = Language(symbol())
+                        TS_LANG_CACHE[lang_name] = lang
+                        return lang
+                except Exception:
+                    pass
 
-    return None
+        return None
 
 def get_highlights(lang_name: str) -> str:
     if lang_name in HIGHLIGHTS_CACHE: return HIGHLIGHTS_CACHE[lang_name] # Return cached
     
-    # 1. Try package resources
+    # 1. Try individual package resources (e.g. tree_sitter_python)
     try:
         import importlib.resources as pkg_resources
         mod_name = f"tree_sitter_{lang_name}"
         res = None
         # Try to read the highlights.scm file using modern or legacy methods
         if hasattr(pkg_resources, "files"):
-            try: res = (pkg_resources.files(mod_name) / "queries" / "highlights.scm").read_text()
-            except (FileNotFoundError, Exception): pass
+            try:
+                res = (pkg_resources.files(mod_name) / "queries" / "highlights.scm").read_text()
+            except (FileNotFoundError, Exception):
+                pass
         if res is None:
-            try: res = pkg_resources.read_text(f"{mod_name}.queries", "highlights.scm")
-            except (ModuleNotFoundError, Exception): pass
+            try:
+                res = pkg_resources.read_text(f"{mod_name}.queries", "highlights.scm")
+            except (ModuleNotFoundError, Exception):
+                pass
         
         if res is not None:
             if lang_name == "cpp": res = get_highlights("c") + "\n" + res
             HIGHLIGHTS_CACHE[lang_name] = res
             return res
-    except Exception: pass
+    except Exception:
+        pass
 
-    # 2. Try system-specific paths (e.g., Termux)
+    # 2. Try tree-sitter-languages packaged queries
+    try:
+        import tree_sitter_languages
+        ts_languages_dir = os.path.dirname(tree_sitter_languages.__file__)
+        possible_query_paths = [
+            os.path.join(ts_languages_dir, "languages", "queries", f"{lang_name}.scm"),
+            os.path.join(ts_languages_dir, "languages", "queries", lang_name, "highlights.scm"),
+            os.path.join(ts_languages_dir, "repos", lang_name, "queries", "highlights.scm"),
+            os.path.join(ts_languages_dir, "repos", f"tree-sitter-{lang_name}", "queries", "highlights.scm")
+        ]
+        for qp in possible_query_paths:
+            if os.path.exists(qp):
+                res = Path(qp).read_text(encoding="utf-8")
+                if lang_name == "cpp": res = get_highlights("c") + "\n" + res
+                HIGHLIGHTS_CACHE[lang_name] = res
+                return res
+    except Exception:
+        pass
+
+    # 3. Try system-specific paths (e.g., Termux) as a final query fallback
     system_query_paths = [
         f"/data/data/com.termux/files/usr/share/tree-sitter/queries/{lang_name}/highlights.scm",
-        f"/usr/share/tree-sitter/queries/{lang_name}/highlights.scm"
+        f"/data/data/com.termux/files/usr/share/tree-sitter/queries/tree-sitter-{lang_name}/highlights.scm",
+        f"/usr/share/tree-sitter/queries/{lang_name}/highlights.scm",
+        f"/usr/share/tree-sitter/queries/tree-sitter-{lang_name}/highlights.scm"
     ]
     for p in system_query_paths:
         if os.path.exists(p):
@@ -112,7 +184,8 @@ def get_highlights(lang_name: str) -> str:
                 if lang_name == "cpp": res = get_highlights("c") + "\n" + res
                 HIGHLIGHTS_CACHE[lang_name] = res
                 return res
-            except Exception: pass
+            except Exception:
+                pass
     
     HIGHLIGHTS_CACHE[lang_name] = ""
     return ""
@@ -123,6 +196,7 @@ EXT_MAP = {
     ".html": "html", ".htm": "html", ".js": "javascript",
     ".jl": "julia", ".f90": "fortran", ".f95": "fortran", ".f": "fortran",
     ".nim": "nim", ".zig": "zig", ".sh": "bash", ".bash": "bash",
+    ".bat": "batch", ".ps1": "powershell",
     ".sql": "sql", ".yaml": "yaml", ".yml": "yaml", ".json": "json",
     ".md": "markdown", ".css": "css"
 }
@@ -383,10 +457,10 @@ class FEDERATE_IDE(App):
     #editor_pane { width: 56%; height: 100%; }
     #outline_pane { width: 22%; height: 100%; }
 
-    #dir_tree, TextArea, #outline_tree {
+    #dir_tree, #editor_tabs TextArea, #outline_tree {
         border: round transparent;
     }
-    #dir_tree:focus, TextArea:focus, #outline_tree:focus {
+    #dir_tree:focus, #editor_tabs TextArea:focus, #outline_tree:focus {
         border: round $accent;
     }
 
@@ -407,19 +481,26 @@ class FEDERATE_IDE(App):
         Binding("ctrl+q", "quit", "Quit", priority=True),
         
         Binding("ctrl+l", "cycle_tab_forward", "Next Tab", show=False),
-        Binding("ctrl+j", "cycle_tab_backward", "Prev Tab", show=False),
+        Binding("ctrl+o", "cycle_tab_backward", "Prev Tab", show=False),
         Binding("ctrl+c", "copy_selected", "Copy", show=True),
         
         Binding("ctrl+r", "run_file", "Run File", priority=True),
         Binding("ctrl+e", "terminate_execution", "Terminate Run", priority=True),
         Binding("f9", "open_settings", "Run Configs", priority=True),
         Binding("f7", "new_folder", "New Folder", priority=True),
+        Binding("f8", "change_directory", "Change Dir", priority=True),
+        Binding("f10", "open_venv_manager", "Venv Mgr", priority=True),
         
         Binding("ctrl+s", "save_file", "Save", priority=True),
         Binding("ctrl+shift+s", "save_as", "Save As", priority=True),
         Binding("ctrl+n", "new_file", "New File", priority=True),
         Binding("ctrl+f", "find_replace", "Find/Replace", priority=True),
         Binding("ctrl+k", "new_chat", "New Chat", priority=True),
+
+        # Bubble up agent bindings so they are accessible directly from the Editor
+        Binding("f2", "open_chat_manager", "Sessions", show=False),
+        Binding("f4", "open_active_config", "Manage Agents", show=False),
+        Binding("f5", "switch_agent", "Switch Agent", show=False),
     ]
     
     def __init__(self, initial_file: str = None):
@@ -433,7 +514,46 @@ class FEDERATE_IDE(App):
         
         self.run_configs = {k: v.copy() for k, v in DEFAULT_RUN_CONFIGS.items()}
         self.exec_count = 0
-
+        self.active_venv_name = "defaultVenv"
+        self.active_venv_path = os.path.join(os.path.expanduser("~"), ".federate", "defaultVenv")
+    
+    def action_quit(self):
+        """Signals background threads to stop, restores terminal state, and terminates process."""
+        import threading
+        import os
+        
+        # 1. Signal all internal logic to stop
+        try:
+            import toolbox
+            toolbox.ABORT_EVENT.set()
+        except Exception:
+            pass
+            
+        try:
+            self.query_one("#ai_agent_view").action_abort()
+        except Exception:
+            pass
+            
+        # 2. Start a 'Dead Man's Switch' timer. 
+        # This gives Textual 500ms to cleanly tear down the TUI screen and restore terminal modes
+        # before we forcefully terminate the process and any hung background threads.
+        def hard_kill():
+            print('\033[?25h', end='', flush=True)
+            os._exit(0)
+        
+        kill_timer = threading.Timer(0.5, hard_kill)
+        kill_timer.daemon = True
+        kill_timer.start()
+        
+        # 3. Standard polite exit (restores terminal state)
+        self.exit()
+        
+        # 4. Clear terminal after TUI closes
+        try:
+            os.system('cls' if os.name == 'nt' else 'clear')
+        except Exception:
+            pass
+    
     def compose(self) -> ComposeResult:
         yield Header()
         with ContentSwitcher(initial="ai_chat_view", id="main_switcher"):
@@ -457,6 +577,7 @@ class FEDERATE_IDE(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.theme = "monokai"
         try:
             import os
             os.chdir(self.query_one("#dir_tree").path)
@@ -464,6 +585,9 @@ class FEDERATE_IDE(App):
             pass
         tabs_widget = self.query_one("#editor_tabs", TabbedContent).query_one(Tabs)
         tabs_widget.can_focus = False
+        
+        # Activate default venv
+        self.activate_venv(self.active_venv_name, self.active_venv_path)
 
         if self.initial_file:
             path = Path(self.initial_file).absolute()
@@ -483,17 +607,33 @@ class FEDERATE_IDE(App):
         # --- FIX: Change focus from dir_tree to chat input ---
         try:
             # We look for the AI input inside the AIAgentView component
-            self.query_one("#ai_chat_input", Input).focus()
+            self.query_one("#ai_chat_input").focus()
         except Exception:
             # Fallback if AI agent isn't loaded/visible
             self.query_one("#dir_tree").focus()
+    
+    def action_open_chat_manager(self):
+        if HAS_AI_AGENT:
+            try: self.query_one("#ai_agent_view").action_open_chat_manager()
+            except Exception: pass
 
+    def action_open_active_config(self):
+        if HAS_AI_AGENT:
+            try: self.query_one("#ai_agent_view").action_open_active_config()
+            except Exception: pass
+
+    def action_switch_agent(self):
+        if HAS_AI_AGENT:
+            try: self.query_one("#ai_agent_view").action_switch_agent()
+            except Exception: pass
+    
     def action_cycle_view(self):
         self.current_view_index = (self.current_view_index + 1) % len(self.views)
         
         if self.views[self.current_view_index] == "exec_manager_view":
-            # Skip if no executions ever started, OR if all execution tabs were closed
-            is_empty = self.exec_count == 0 or len(self.query_one("#exec_manager_view").query(TabPane)) == 0
+            # Skip if no executions started, OR if the active execution tab is the idle panel
+            exec_manager = self.query_one("#exec_manager_view")
+            is_empty = self.exec_count == 0 or exec_manager.query_one("#exec_tabs").active == "idle_pane"
             if is_empty:
                 self.current_view_index = (self.current_view_index + 1) % len(self.views)
             
@@ -546,15 +686,41 @@ class FEDERATE_IDE(App):
                 self.query_one("#dir_tree").focus()
 
     def _cycle_tabs(self, direction: int):
-        tabs = self.query_one("#editor_tabs", TabbedContent)
-        if not tabs.active or len(self.open_files) < 2: return
-        panes = tabs.query(TabPane)
-        pane_ids = [p.id for p in panes]
-        try:
-            next_index = (pane_ids.index(tabs.active) + direction + len(pane_ids)) % len(pane_ids)
-            tabs.active = pane_ids[next_index]
-            self.query_one(f"#{tabs.active} TextArea").focus()
-        except ValueError: pass
+        switcher = self.query_one("#main_switcher")
+        
+        # Scenario A: Code View (cycle through open editor files)
+        if switcher.current == "code_view":
+            tabs = self.query_one("#editor_tabs", TabbedContent)
+            if not tabs.active or len(self.open_files) < 2: return
+            panes = tabs.query(TabPane)
+            pane_ids = [p.id for p in panes]
+            try:
+                next_index = (pane_ids.index(tabs.active) + direction + len(pane_ids)) % len(pane_ids)
+                tabs.active = pane_ids[next_index]
+                self.query_one(f"#{tabs.active} TextArea").focus()
+            except ValueError: pass
+
+        # Scenario B: Execution View (cycle through active script runs)
+        elif switcher.current == "exec_manager_view":
+            try:
+                manager = self.query_one("#exec_manager_view")
+                tabs = manager.query_one("#exec_tabs", TabbedContent)
+                panes = tabs.query(TabPane)
+                if len(panes) < 2: return
+                pane_ids = [p.id for p in panes]
+                
+                next_index = (pane_ids.index(tabs.active) + direction + len(pane_ids)) % len(pane_ids)
+                tabs.active = pane_ids[next_index]
+                
+                # Automatically focus the terminal inside the newly active tab
+                try:
+                    from execution import TerminalEmulator
+                    term = manager.query_one(f"#{tabs.active}", TabPane).query_children(TerminalEmulator).first()
+                    term.focus()
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
     def action_cycle_tab_forward(self): self._cycle_tabs(1)
     def action_cycle_tab_backward(self): self._cycle_tabs(-1)
@@ -683,7 +849,7 @@ class FEDERATE_IDE(App):
         
         self.exec_count += 1
         manager = self.query_one("#exec_manager_view", ExecutionManager)
-        manager.start_run(str(file_data["path"]), config.get("executable", ""), config.get("flags", ""), self.exec_count)
+        manager.start_run(str(file_data["path"]), config.get("executable", ""), config.get("flags", ""), self.exec_count, venv_path=getattr(self, "active_venv_path", None))
         
         switcher = self.query_one("#main_switcher")
         self.current_view_index = self.views.index("exec_manager_view")
@@ -918,7 +1084,82 @@ class FEDERATE_IDE(App):
         populate(tree.root, virtual_tree)
         tree.root.expand_all()
 
-if __name__ == "__main__":
+    def get_venv_root(self) -> str:
+        path = os.path.join(os.path.expanduser("~"), ".federate")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def resolve_uv_path(self) -> str:
+        import shutil
+        sys_path = shutil.which("uv")
+        if sys_path:
+            return sys_path
+        return "uv"
+
+    @work(thread=True)
+    def create_custom_venv(self, name: str, py_version: str = None, custom_path: str = None):
+        if custom_path:
+            new_path = os.path.abspath(custom_path)
+            if name and not new_path.endswith(name):
+                new_path = os.path.join(new_path, name)
+            display_name = name or os.path.basename(new_path)
+        else:
+            new_path = os.path.join(self.get_venv_root(), name)
+            display_name = name
+
+        self.notify(f"Creating venv at {new_path}...", severity="information")
+        
+        try:
+            uv_path = self.resolve_uv_path()
+            args = [uv_path, "venv", new_path, "--seed"]
+            if py_version:
+                args.extend(["--python", py_version])
+            
+            proc = subprocess.run(args, capture_output=True, text=True)
+            if proc.returncode != 0:
+                self.notify("uv failed, falling back to standard venv...", severity="warning")
+                args = [sys.executable, "-m", "venv", new_path]
+                subprocess.run(args, check=True, capture_output=True, text=True)
+                
+            self.app.call_from_thread(self.activate_venv, display_name, new_path)
+            self.app.call_from_thread(self.notify, f"Venv Created & Activated: {display_name}", severity="information")
+        except Exception as e:
+            self.app.call_from_thread(self.notify, f"Failed to create venv: {e}", severity="error")
+
+    def activate_venv(self, name: str, path: str):
+        self.active_venv_name = name
+        self.active_venv_path = path
+        python_bin = os.path.join(path, "Scripts" if os.name == "nt" else "bin", "python" + (".exe" if os.name == "nt" else ""))
+        if "python" in self.run_configs:
+            self.run_configs["python"]["executable"] = python_bin
+
+    def action_open_venv_manager(self):
+        from execution import VenvManagerModal
+        def handle_venv_mgr(result):
+            if result == "default":
+                default_path = os.path.join(self.get_venv_root(), "defaultVenv")
+                self.activate_venv("defaultVenv", default_path)
+                self.notify("Reset to Default Venv", severity="information")
+            elif isinstance(result, dict):
+                if result.get("action") == "switch":
+                    target = result["name"]
+                    if os.path.isabs(target):
+                        name = os.path.basename(target)
+                        path = target
+                    else:
+                        name = target
+                        path = os.path.join(self.get_venv_root(), target)
+                    self.activate_venv(name, path)
+                    self.notify(f"Activated Venv: {name}", severity="information")
+                elif result.get("action") == "create":
+                    self.create_custom_venv(result.get("name"), result.get("version"), result.get("path"))
+                    
+        self.app.push_screen(VenvManagerModal(self.get_venv_root(), self.active_venv_name), handle_venv_mgr)
+
+def main():
     initial_file = sys.argv[1] if len(sys.argv) > 1 else None
     app = FEDERATE_IDE(initial_file=initial_file)
     app.run()
+
+if __name__ == "__main__":
+    main()

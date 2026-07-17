@@ -112,7 +112,7 @@ class TelegramManager:
         config = load_telegram_config()
         self.bot_token = config.get("bot_token", "").strip()
         self.tts_enabled = config.get("tts_enabled", False)
-        self.allowed_users =[
+        self.allowed_users = [
             u.strip().lower() for u in config.get("allowed_users", "").split(",") if u.strip()
         ]
         
@@ -122,6 +122,13 @@ class TelegramManager:
                 if self.log_callback:
                     self.log_callback("[bold red]Telegram Disabled: 'Allowed Users' cannot be empty. Public access is strictly forbidden.[/bold red]")
                 return
+            
+            # --- SINGLE USER ENFORCEMENT ---
+            if len(self.allowed_users) > 1:
+                if self.log_callback:
+                    self.log_callback("[bold red]Telegram Disabled: Multiple users detected. Only a single authorized operator is allowed to protect single-user session state.[/bold red]")
+                return
+                
             self.start()
 
     def start(self):
@@ -263,6 +270,11 @@ class TelegramManager:
                                 username = msg.get("from", {}).get("username", "").lower()
                                 text = msg["text"]
                                 
+                                # --- PROGRAMMATIC GUARDRAIL: Refuse Group Chats ---
+                                if chat_id < 0:
+                                    self.send_message(chat_id, "Group chats are disabled for security reasons. Please message me privately.")
+                                    continue
+                                    
                                 # --- SECURITY FIX: Unconditional auth check ---
                                 if username not in self.allowed_users and str(chat_id) not in self.allowed_users:
                                     self.send_message(chat_id, "Sorry, you are not authorized.")

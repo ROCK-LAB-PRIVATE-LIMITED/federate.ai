@@ -6,9 +6,8 @@ import re
 from textual.suggester import Suggester
 
 SLASH_COMMANDS =[
-    "/tools", "/tools desc", "/tools nodesc",
+    "/tools",
     "/arm", "/config", "/safe",
-    "/ide", "/ide disable", "/ide enable", "/ide install", "/ide status",
     "/init",
     "/compress",
     "/copy",
@@ -18,6 +17,7 @@ SLASH_COMMANDS =[
     "/select_agent", "/clear_all",
     "/dpi", "/schedule",
     "/skills",
+    "/settings",
     "/help"
 ]
 
@@ -417,11 +417,23 @@ def process_slash_command(command: str, agent_view):
         if not args:
             agent_view.log_to_ui("[bold red]Usage: /select_agent <agent_name>[/bold red]")
             return
-        agent_name = args[0]
-        if agent_view.select_agent(agent_name):
-            agent_view.log_to_ui(f"[bold green]Switched active agent to: {agent_name}[/bold green]")
+        # Support multi-word agent names
+        raw_name = " ".join(args)
+        if agent_view.select_agent(raw_name):
+            # Grab the officially resolved, correctly-cased name from the active agent
+            resolved_name = agent_view.active_agent.name
+            agent_view.log_to_ui(f"[bold green]Switched active agent to: {resolved_name}[/bold green]")
+            from agent import get_welcome_banner
+            new_renderable = get_welcome_banner(agent_view, specific_agent=resolved_name, return_renderable=True)
+            banners = agent_view.query(".welcome_banner_box")
+            if banners:
+                for banner in banners:
+                    banner.update(new_renderable)
+            else:
+                from textual.widgets import Static
+                agent_view._write_log(Static(new_renderable, classes="welcome_banner_box"))
         else:
-            agent_view.log_to_ui(f"[bold red]Agent '{agent_name}' not found.[/bold red]")
+            agent_view.log_to_ui(f"[bold red]Agent '{raw_name}' not found.[/bold red]")
 
     elif cmd == "/clear_all":
         agent_view.session_manager.clear_all_contexts()
@@ -429,11 +441,9 @@ def process_slash_command(command: str, agent_view):
     
     elif cmd == "/dpi":
         if not args:
-            # Lazily load from disk if not yet initialized in memory
-            current_dpi = getattr(agent_view, "pdf_dpi", None)
-            if current_dpi is None:
-                current_dpi = load_pdf_dpi()
-                agent_view.pdf_dpi = current_dpi
+            # Always load directly from global configuration to prevent memory stale caches
+            current_dpi = load_pdf_dpi()
+            agent_view.pdf_dpi = current_dpi
             agent_view.log_to_ui(f"[bold cyan]Current PDF rendering DPI: {current_dpi}[/bold cyan]")
             return
         try:
@@ -482,7 +492,12 @@ def process_slash_command(command: str, agent_view):
             output += "- *None learned yet.*\n"
             
         agent_view.log_to_ui(output, is_markdown=True)
-
+    
+    elif cmd == "/settings":
+        if hasattr(agent_view, "action_open_global_settings"):
+            agent_view.action_open_global_settings()
+        return
+    
     elif cmd == "/help":
         help_text = """
 ### 🛠️ Available Chat Commands
@@ -493,9 +508,8 @@ def process_slash_command(command: str, agent_view):
 | `/arm` | **Toggle tools state:** Switches between `PLAN` mode (Safe, Read-Only) and `EXECUTE` mode (Write/Execute enabled). |
 | `/safe` | Takes the system into `PLAN` (Read-Only) mode. |
 | `/directory` or `/dir` | Open the interactive workspace directory picker. |
-| `/tools[desc]` | List all currently available AI tools. Add `desc` or `nodesc` to toggle descriptions. |
-| `/ide [status]` | Manage or check the status of IDE integration. |
-| `/init` | Initialize a base `GEMINI.md` project context file in the active workspace. |
+| `/tools` | List all currently available AI tools. |
+| `/init` | Initialize a base `Federate.md` project context file in the active workspace. |
 | `/compress` | Compress the current chat history to save tokens while retaining key context. |
 | `/copy` | Copy the last AI message directly to your system clipboard. |
 | `/config` | Setup the model, provider and other details. |
@@ -504,6 +518,7 @@ def process_slash_command(command: str, agent_view):
 | `/telegram` | Configure and activate the Telegram Bot integration. |
 | `/schedule` | Open the automated daily task scheduler menu. |
 | `/skills` | List all passive and active skills currently available to the active agent. |
+| `/settings` | Open global harness settings modal. |
 
 ### ⚡ Interactive Features
 - **File Injection:** Type `&` followed by a file or directory path (e.g. `&src/main.py`). Press **`UP/DOWN`** to dynamically cycle through available files! Hit `ENTER` to inject their content into the AI's prompt context.
@@ -600,23 +615,13 @@ def handle_ampersand_commands(prompt: str, agent_view) -> str:
 
 
 def save_pdf_dpi(dpi: int):
-    """Persists PDF DPI configuration to .federate folder."""
-    from toolbox import get_storage_path
-    path = get_storage_path("pdf_config.json")
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"pdf_dpi": dpi}, f)
-    except Exception:
-        pass
+    """Persists PDF DPI configuration to global settings."""
+    from toolbox import load_global_settings, save_global_settings
+    config = load_global_settings()
+    config["pdf_dpi"] = dpi
+    save_global_settings(config)
 
 def load_pdf_dpi() -> int:
-    """Loads persisted PDF DPI configuration from .federate folder."""
-    from toolbox import get_storage_path
-    path = get_storage_path("pdf_config.json")
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f).get("pdf_dpi", 150)
-        except Exception:
-            pass
-    return 150
+    """Loads persisted PDF DPI configuration from global settings."""
+    from toolbox import load_global_settings
+    return load_global_settings().get("pdf_dpi", 150)

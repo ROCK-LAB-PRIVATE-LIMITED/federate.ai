@@ -23,7 +23,45 @@ from markdownify import markdownify as md
 
 _LAST_LLM_CALL_TIME = 0.0
 _LLM_LOCK = threading.Lock()
-_DYNAMIC_PACING_DELAY = 65.0  # Safe 65s baseline (65 +- 9s on boot)
+
+# Persistent Global Settings Helper
+GLOBAL_SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".federate", "global_settings.json")
+
+DEFAULT_GLOBAL_SETTINGS = {
+    "search_pacing_delay": 65.0,
+    "max_search_results": 10,
+    "scraper_max_bytes": 1000000,
+    "scraper_timeout": 120.0,
+    "scraper_max_tokens": 30000,
+    "max_api_retries": 20,
+    "api_retry_delay": 15.0,
+    "quota_retry_delay": 120.0,
+    "max_research_agents": 4,
+    "research_context_tokens": 28000,
+    "research_min_length": 5000,
+    "max_shrink_attempts": 15,
+    "pdf_dpi": 150,
+}
+
+def load_global_settings() -> dict:
+    settings = DEFAULT_GLOBAL_SETTINGS.copy()
+    if os.path.exists(GLOBAL_SETTINGS_FILE):
+        try:
+            with open(GLOBAL_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                settings.update(json.load(f))
+        except Exception:
+            pass
+    return settings
+
+def save_global_settings(settings: dict):
+    try:
+        os.makedirs(os.path.dirname(GLOBAL_SETTINGS_FILE), exist_ok=True)
+        with open(GLOBAL_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=4)
+    except Exception:
+        pass
+
+_DYNAMIC_PACING_DELAY = float(load_global_settings()["search_pacing_delay"])
 
 # Persistent search pacing state file (RFC 1918 & cross-restart safety)
 _SEARCH_STATE_PATH = os.path.join(str(Path.home()), ".federate", "search_state.json")
@@ -53,8 +91,9 @@ def _get_search_delay() -> float:
     global _LAST_SEARCH_TIME
     with _SEARCH_LOCK:
         now = time.time()
-        jitter = random.uniform(-9.0, 9.0)
-        pacing_target = 65.0 + jitter
+        pacing_base = load_global_settings().get("search_pacing_delay", 65.0)
+        jitter = random.uniform(-9.0, 9.0) if pacing_base > 9.0 else 0.0
+        pacing_target = pacing_base + jitter
         
         if now - _LAST_SEARCH_TIME > pacing_target:
             _LAST_SEARCH_TIME = now - pacing_target
@@ -98,6 +137,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from rich.markup import escape
 # Global references so tools can communicate with the active Textual app
 CURRENT_APP = None
+CURRENT_AGENT_VIEW = None
 CURRENT_LOG_CB = None
 ABORT_EVENT = threading.Event()
 
@@ -111,6 +151,26 @@ from pathlib import Path
 # --- GLOBAL SYSTEM STORAGE REDIRECTION ---
 # Redirects all internal state/memories outside the code folder to your safe Home Directory.
 FEDERATE_DIR = os.path.join(str(Path.home()), ".federate")
+
+DEFAULT_VENV_PATH = os.path.join(FEDERATE_DIR, "defaultVenv")
+
+def _bootstrap_scratchpad_venv():
+    """Silently creates a default scratchpad virtual environment in the background if missing."""
+    try:
+        if not os.path.exists(DEFAULT_VENV_PATH):
+            # Use the host system's running Python executable to guarantee version matching
+            subprocess.run(
+                [sys.executable, "-m", "venv", DEFAULT_VENV_PATH], 
+                stdout=subprocess.DEVNULL, 
+                stderr=subprocess.DEVNULL, 
+                check=True
+            )
+    except Exception:
+        pass
+
+# Run bootstrapping on a daemon thread to keep UI startup instant and non-blocking.
+# Since the function is now defined above, this resolves the NameError.
+threading.Thread(target=_bootstrap_scratchpad_venv, daemon=True).start()
 
 def get_storage_path(*args):
     """Explicitly builds a path inside FEDERATE_DIR for 'agents' or 'sessions'."""
@@ -223,7 +283,8 @@ def _get_agent(config: RunnableConfig) -> str:
 def resilient_invoke(model, messages):
     """Wraps raw LLM calls in a retry loop, but fails fast on fatal API errors."""
     global _LAST_LLM_CALL_TIME, _DYNAMIC_PACING_DELAY
-    for attempt in range(20): 
+    max_retries = load_global_settings().get("max_api_retries", 20)
+    for attempt in range(max_retries): 
         check_abort()
         sleep_needed = 0.0
         
@@ -334,8 +395,9 @@ def resilient_invoke(model, messages):
             # 3. Standard connection drops: print a single-line summary and retry
             first_line = error_str.splitlines()[0] if error_str else "Unknown connection issue"
             clean_err = first_line[:120] + "..." if len(first_line) > 120 else first_line
-            safe_print(f"⚠️ Connection dropped. Retrying in 15s... ({clean_err})")
-            time.sleep(15)
+            retry_delay = load_global_settings().get("api_retry_delay", 15.0)
+            safe_print(f"⚠️ Connection dropped. Retrying in {int(retry_delay)}s... ({clean_err})")
+            time.sleep(retry_delay)
     raise Exception("Max network retries exceeded.")
 
 def log_tool(msg: str):
@@ -612,16 +674,39 @@ def list_files(directory: str = None) -> str:
         
         ignore_patterns =['.git', '__pycache__', 'node_modules', 'venv', '.venv', '.idea', '.vscode']
         
-        # Inject .gitignore rules if present
-        gitignore_path = get_storage_path(safe_dir, '.gitignore')
-        if os.path.exists(gitignore_path):
-            with open(gitignore_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith('#'):
-                        if line.endswith('/'): 
-                            line = line[:-1]
-                        ignore_patterns.append(line)
+        # Determine active workspace root base directory
+        try:
+            base_dir = str(CURRENT_APP.query_one("#dir_tree").path) if CURRENT_APP else os.getcwd()
+        except Exception:
+            base_dir = os.getcwd()
+
+        # 1. Load project root-level ignore rules (standard fallback)
+        for ignore_file in ('.gitignore', '.listignore'):
+            ignore_path = os.path.join(base_dir, ignore_file)
+            if os.path.exists(ignore_path):
+                with open(ignore_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            if line.endswith('/'): 
+                                line = line[:-1]
+                            # Standardize directory separators for cross-platform matches
+                            line = line.replace('/', os.sep)
+                            ignore_patterns.append(line)
+
+        # 2. Load directory-level ignore rules (cascading subdirectory overrides)
+        if os.path.abspath(safe_dir) != os.path.abspath(base_dir):
+            for ignore_file in ('.gitignore', '.listignore'):
+                ignore_path = os.path.join(safe_dir, ignore_file)
+                if os.path.exists(ignore_path):
+                    with open(ignore_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith('#'):
+                                if line.endswith('/'): 
+                                    line = line[:-1]
+                                line = line.replace('/', os.sep)
+                                ignore_patterns.append(line)
 
         def is_ignored(rel_path):
             parts = rel_path.split(os.sep)
@@ -633,7 +718,7 @@ def list_files(directory: str = None) -> str:
         ALLOWED_EXTENSIONS = {
             '.py', '.go', '.rs', '.c', '.h', '.cpp', '.hpp', '.js', '.jsx', '.ts', '.tsx', 
             '.html', '.css', '.json', '.md', '.txt', '.yaml', '.yml', '.sh', '.bat',
-            '.java', '.sql', '.toml', '.pdf', '.png'
+            '.java', '.sql', '.toml', '.pdf', '.png', '.sgy', '.segy', '.dlis', '.lis', '.las'
         }
 
         valid_rel_paths =[]
@@ -687,6 +772,24 @@ def run_terminal_command(command: str) -> str:
         
         log_tool(f"Running command: [cyan]{command}[/cyan]")
         
+        clean_env = os.environ.copy()
+        
+        # 1. Clean the host environment's venv variables
+        host_venv = clean_env.pop("VIRTUAL_ENV", None)
+        clean_env.pop("UV_ACTIVE", None)
+        
+        paths = clean_env.get("PATH", "").split(os.pathsep)
+        if host_venv:
+            host_bin = os.path.join(host_venv, "Scripts" if os.name == "nt" else "bin")
+            paths = [p for p in paths if os.path.normpath(p) != os.path.normpath(host_bin)]
+            
+        # 2. Inject our scratchpad defaultVenv instead
+        scratch_bin = os.path.join(DEFAULT_VENV_PATH, "Scripts" if os.name == "nt" else "bin")
+        paths.insert(0, scratch_bin)
+        
+        clean_env["PATH"] = os.pathsep.join(paths)
+        clean_env["VIRTUAL_ENV"] = DEFAULT_VENV_PATH
+        
         # Use start_new_session=True to create a new process group for the command
         # This allows us to kill the command and all its children
         proc = subprocess.Popen(
@@ -696,7 +799,8 @@ def run_terminal_command(command: str) -> str:
             stderr=subprocess.PIPE, 
             text=True, 
             cwd=base_dir,
-            start_new_session=True
+            start_new_session=True,
+            env=clean_env
         )
         
         # Buffers to track what we have already printed to the chat UI
@@ -710,6 +814,7 @@ def run_terminal_command(command: str) -> str:
                 # Forcefully kill the process or process group
                 try:
                     if os.name == "nt":
+                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
                         proc.kill()  # Windows: Unconditionally terminates the process
                     else:
                         os.killpg(os.getpgid(proc.pid), 9)  # macOS/Linux: Terminates process group
@@ -718,13 +823,13 @@ def run_terminal_command(command: str) -> str:
                 return "Error: Command aborted by user."
             
             # 2. Batch ID check for interrupts
-            if CURRENT_APP:
+            if CURRENT_AGENT_VIEW: # <--- CHANGED THIS
                 try:
-                    agent_view = CURRENT_APP.query_one("#ai_agent_view")
                     task_batch = getattr(thread_context, "batch_id", 0)
-                    if task_batch != 0 and task_batch != getattr(agent_view, "current_batch_id", 0):
+                    if task_batch != 0 and task_batch != getattr(CURRENT_AGENT_VIEW, "current_batch_id", 0):
                         try:
                             if os.name == "nt":
+                                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
                                 proc.kill()
                             else:
                                 os.killpg(os.getpgid(proc.pid), 9)
@@ -747,9 +852,11 @@ def run_terminal_command(command: str) -> str:
                 new_err = stderr[len(stderr_logged):] if stderr else ""
                 
                 if new_out:
-                    log_tool(f"[#808080]{escape(new_out)}[/#808080]")
+                    new_out_clean = re.sub(r'[A-Za-z0-9+/=]{100,}', '<base64_chunk_omitted>', new_out)
+                    log_tool(f"[#808080]{escape(new_out_clean)}[/#808080]")
                 if new_err:
-                    log_tool(f"[bold red]{escape(new_err)}[/bold red]")
+                    new_err_clean = re.sub(r'[A-Za-z0-9+/=]{100,}', '<base64_chunk_omitted>', new_err)
+                    log_tool(f"[bold red]{escape(new_err_clean)}[/bold red]")
                     
                 break  # Exit loop successfully
                 
@@ -768,10 +875,12 @@ def run_terminal_command(command: str) -> str:
                 
                 # If new text arrived, push it immediately to the UI and update the markers
                 if new_out:
-                    log_tool(f"[#808080]{escape(new_out)}[/#808080]")
+                    new_out_clean = re.sub(r'[A-Za-z0-9+/=]{100,}', '<base64_chunk_omitted>', new_out)
+                    log_tool(f"[#808080]{escape(new_out_clean)}[/#808080]")
                     stdout_logged = stdout
                 if new_err:
-                    log_tool(f"[bold red]{escape(new_err)}[/bold red]")
+                    new_err_clean = re.sub(r'[A-Za-z0-9+/=]{100,}', '<base64_chunk_omitted>', new_err)
+                    log_tool(f"[bold red]{escape(new_err_clean)}[/bold red]")
                     stderr_logged = stderr
             
         return f"STDOUT:\n{stdout}\nSTDERR:\n{stderr}"
@@ -833,9 +942,10 @@ def search_web(query: str) -> str:
         import subprocess, json, os
         bin_path = get_storage_path(os.path.dirname(os.path.abspath(__file__)), "bin", "federate_search" + (".exe" if os.name == "nt" else ""))
         
+        max_results = str(load_global_settings().get("max_search_results", 10))
         # Use Popen to allow interruption mid-search
         proc = subprocess.Popen(
-            [bin_path, query, "10"],
+            [bin_path, query, max_results],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -973,16 +1083,20 @@ def get_token_status(messages: List[BaseMessage]) -> str:
     try: encoding = tiktoken.get_encoding("cl100k_base")
     except: encoding = tiktoken.get_encoding("cl100k_base")
     total = sum(len(encoding.encode(str(m.content or ""))) + 4 for m in messages)
-    return f"[{total}/{TARGET_CONTEXT_TOKENS}]"
+    target_tokens = load_global_settings().get("research_context_tokens", 28000)
+    return f"[{total}/{target_tokens}]"
 
 def get_total_tokens(messages: List[BaseMessage]) -> int:
     try: encoding = tiktoken.get_encoding("cl100k_base")
     except: encoding = tiktoken.get_encoding("cl100k_base")
     return sum(len(encoding.encode(str(m.content or ""))) + 4 for m in messages)
 
-def scrape_full_content(url: str, max_tokens_per_fetch: int = 30000) -> str:
+def scrape_full_content(url: str, max_tokens_per_fetch: int = None) -> str:
     try:
         from curl_cffi import requests as cffi_requests
+        
+        if max_tokens_per_fetch is None:
+            max_tokens_per_fetch = load_global_settings().get("scraper_max_tokens", 30000)
         
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
@@ -991,23 +1105,24 @@ def scrape_full_content(url: str, max_tokens_per_fetch: int = 30000) -> str:
             resp = session.get(url, timeout=15, stream=True, allow_redirects=True)
             resp.raise_for_status()
             
-            max_bytes = 1_000_000 
+            max_bytes = load_global_settings().get("scraper_max_bytes", 1000000)
             content = b""
             
             # --- THE FIX: Absolute Time Limit ---
             start_time = time.time()
+            timeout = load_global_settings().get("scraper_timeout", 120.0)
             
             for chunk in resp.iter_content(chunk_size=8192):
                 content += chunk
                 
                 # Size Kill-Switch
                 if len(content) > max_bytes:
-                    safe_print(f"[NETWORK] Kill switch engaged: Page exceeds 1MB. Stopping download.")
+                    safe_print(f"[NETWORK] Kill switch engaged: Page exceeds {max_bytes / 1000000:.1f}MB. Stopping download.")
                     break
                     
-                # Time Kill-Switch (Abort if page takes longer than 120 seconds to stream)
-                if time.time() - start_time > 120:
-                    safe_print(f"  [NETWORK] Time switch engaged: Server too slow (>20s). Aborting.")
+                # Time Kill-Switch (Abort if page takes longer than configured timeout)
+                if time.time() - start_time > timeout:
+                    safe_print(f"  [NETWORK] Time switch engaged: Server too slow (>{int(timeout)}s). Aborting.")
                     break
                     
             raw_html = content.decode("utf-8", errors="ignore")
@@ -1052,9 +1167,10 @@ class ProjectName(BaseModel):
 def node_decide(state: AgentState):
     check_abort()
     tokens = get_total_tokens(state["messages"])
-    if tokens < TARGET_CONTEXT_TOKENS:
+    target_tokens = load_global_settings().get("research_context_tokens", 28000)
+    if tokens < target_tokens:
         # Enforce research via Prompt
-        prompt = f"QUOTA: {tokens}/{TARGET_CONTEXT_TOKENS}. You MUST use the 'SearchWeb' tool to find more technical details. Do not quit."
+        prompt = f"QUOTA: {tokens}/{target_tokens}. You MUST use the 'SearchWeb' tool to find more technical details. Do not quit."
         model = thread_context.llm.bind_tools([SearchWeb])
     else:
         prompt = f"QUOTA MET: {tokens}/{TARGET_CONTEXT_TOKENS}. Use 'FinalResponse' tool to synthesize the report now."
@@ -1104,9 +1220,10 @@ def node_execute_search(state: AgentState):
         import subprocess, json, os
         bin_path = get_storage_path(os.path.dirname(os.path.abspath(__file__)), "bin", "federate_search" + (".exe" if os.name == "nt" else ""))
         
+        max_results = str(load_global_settings().get("max_search_results", 10))
         # Use Popen to allow interruption mid-search
         proc = subprocess.Popen(
-            [bin_path, query, "10"],
+            [bin_path, query, max_results],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1174,6 +1291,7 @@ def node_final(state: AgentState):
     safe_print(f" [TARGET REACHED] {tokens} tokens. Synthesizing final answer...")
     reference_table = "\n".join([f"[Source {i}]: {title}" for i, title in manifest.items()])
     
+    min_length = load_global_settings().get("research_min_length", 5000)
     final_instruction = f"""
         CITATION LOOKUP TABLE (Use these numbers):
         {reference_table}
@@ -1183,12 +1301,12 @@ def node_final(state: AgentState):
         2. You MUST cite your sources inline using [Source X] format.
         3. Every claim or technical detail must be followed by at least one [Source X] tag.
         4. Use the Lookup Table above to ensure the numbers match the correct information.
-        5. If response is shorter than {FINAL_ANSWER_MIN_LENGTH} tokens, it will be rejected.
+        5. If response is shorter than {min_length} tokens, it will be rejected.
         """
     try:
         check_abort()
         res = resilient_invoke(thread_context.llm, state["messages"] + [HumanMessage(content=final_instruction)])
-        if not res.content or len(res.content.strip()) < FINAL_ANSWER_MIN_LENGTH:
+        if not res.content or len(res.content.strip()) < min_length:
             return {"messages":[AIMessage(content="RETRY_REQUIRED: Final answer was blank or too short.")]}
         return {"messages": [res]}
     except Exception as e:
@@ -1199,9 +1317,10 @@ def node_final(state: AgentState):
 def route_after_decide(state: AgentState):
     last_msg = state["messages"][-1]
     tokens = get_total_tokens(state["messages"])
+    target_tokens = load_global_settings().get("research_context_tokens", 28000)
     if hasattr(last_msg, "tool_calls") and len(last_msg.tool_calls) > 0:
         tool_name = last_msg.tool_calls[0]["name"]
-        if tokens < TARGET_CONTEXT_TOKENS:
+        if tokens < target_tokens:
             if tool_name == "SearchWeb": return "search"
             safe_print(f"[ENFORCER] AI tried to quit at {tokens} tokens. Forcing more research.")
             return "decide" 
@@ -1263,7 +1382,7 @@ def run_subagent(search_prompt, task_name, output_dir=".", config=None, batch_id
     run_config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 5000}
     
     shrink_attempts = 0       # <--- ADD THIS
-    MAX_SHRINK_ATTEMPTS = 15 
+    max_shrink = load_global_settings().get("max_shrink_attempts", 15)
     
     # Resumption Loop
     for attempt in range(1000):
@@ -1325,8 +1444,9 @@ def run_subagent(search_prompt, task_name, output_dir=".", config=None, batch_id
                 
             # 1. API Rate Limits / Quota Exhaustion
             if any(term in error_str.lower() for term in ["429", "ratelimit", "exhausted", "quota", "limit exceeded", "too many requests"]):
-                safe_print(f"⏳ {task_name}: API Rate Limit/Quota hit. Pausing 120s...")
-                time.sleep(120)
+                quota_delay = load_global_settings().get("quota_retry_delay", 120.0)
+                safe_print(f"⏳ {task_name}: API Rate Limit/Quota hit. Pausing {int(quota_delay)}s...")
+                time.sleep(quota_delay)
                 
             # 2. Database Write Collisions
             elif "locked" in error_str:
@@ -1338,11 +1458,11 @@ def run_subagent(search_prompt, task_name, output_dir=".", config=None, batch_id
                 shrink_attempts += 1
                 
                 # --- EXPLICIT GIVE UP CLAUSE ---
-                if shrink_attempts > MAX_SHRINK_ATTEMPTS:
-                    safe_print(f"⚠️ {task_name}: FATAL. Max truncation attempts ({MAX_SHRINK_ATTEMPTS}) reached. Aborting module so Master Orchestrator can proceed.")
+                if shrink_attempts > max_shrink:
+                    safe_print(f"⚠️ {task_name}: FATAL. Max truncation attempts ({max_shrink}) reached. Aborting module so Master Orchestrator can proceed.")
                     return f"Error in {task_name}: Context limits exhausted."
 
-                safe_print(f"✂️ {task_name}: Context limit exceeded (Truncation attempt {shrink_attempts}/{MAX_SHRINK_ATTEMPTS}). Simple truncation of last document...")
+                safe_print(f"✂️ {task_name}: Context limit exceeded (Truncation attempt {shrink_attempts}/{max_shrink}). Simple truncation of last document...")
                 
                 try:
                     state = subagent_app.get_state(run_config)
@@ -1600,7 +1720,7 @@ def perform_research(topic: str, specific_instructions: str = "") -> str:
     try:
         # 1. Base Defaults (Switched away from stepfun)
         api_key, base_url, model = "", "https://openrouter.ai/api/v1", "google/gemini-2.5-flash:free"
-        max_agents = 4
+        max_agents = load_global_settings().get("max_research_agents", 4)
         vision_enabled = True
         vision_model = "nvidia/nemotron-nano-12b-v2-vl:free"
         
@@ -1824,7 +1944,6 @@ def manage_agenda(action: str, agenda_data: str = "", project_name: str = "") ->
 
 
 
-# --- HERMES MEMORY SYSTEM (Layers 1-3) ---
 
 @tool
 def update_core_memory(section: str, content: str, config: RunnableConfig) -> str:
@@ -2032,7 +2151,7 @@ def finalize_active_skill(tool_name: str, tool_description: str, usage_guide: st
             json.dump(schema, f, indent=4)
             
         # 2. Mandatory: Create Usage Manual (Passive Skill)
-        safe_manual_name = "".join([c if c.isalnum() or c == '_' else "_" for c in tool_name])
+        safe_manual_name = "".join([c if c.isalnum() or c == '_' else "_" for c in tool_name]) + "_manual"
         manual_path = get_storage_path(base_skills, f"{safe_manual_name}.md")
         with open(manual_path, "w", encoding="utf-8") as f:
             f.write(f"# Tool Manual: {tool_name}\n\n## Description\n{tool_description}\n\n## Usage Guide\n{usage_guide}")
@@ -2063,9 +2182,11 @@ def finalize_active_skill(tool_name: str, tool_description: str, usage_guide: st
         return f"Error finalizing skill: {e}"
 
 @tool
-def fix_active_skill(tool_name: str, action: str, file_path: str = None, source_path: str = None, content: str = None, commit_message: str = None, dependencies: List[str] = None, config: RunnableConfig = None) -> str:
+def fix_active_skill(tool_name: str, action: str, documentation: str, file_path: str = None, source_path: str = None, content: str = None, commit_message: str = None, dependencies: List[str] = None, config: RunnableConfig = None) -> str:
     """
     Allows editing and maintaining an existing Active Skill with automatic version control.
+    Compulsorily requires the latest documentation manual for the active skill to be provided.
+    If nothing changed in the manual, simply provide the current/old documentation again.
     
     Actions:
     - 'list': List all files in the tool's directory.
@@ -2077,6 +2198,7 @@ def fix_active_skill(tool_name: str, action: str, file_path: str = None, source_
     Args:
         tool_name: The tool to maintain.
         action: The action to perform (list, read, edit, install, commit).
+        documentation: The full, up-to-date manual/documentation for the skill (compulsory).
         file_path: The target file inside the tool's library (e.g., 'script.py').
         source_path: For 'edit' action: A path to a file in your workspace to copy from.
         content: For 'edit' action: A string of code to write directly.
@@ -2088,6 +2210,15 @@ def fix_active_skill(tool_name: str, action: str, file_path: str = None, source_
     
     if not os.path.exists(active_dir):
         return f"Error: Tool '{tool_name}' not found."
+        
+    # Compulsorily update the passive skill manual with the provided documentation on every call
+    try:
+        safe_name = "".join([c if c.isalnum() or c == '_' else "_" for c in tool_name])
+        manual_path = get_storage_path("agents", "skills", safe_agent_name, f"{safe_name}_manual.md")
+        with open(manual_path, "w", encoding="utf-8") as f:
+            f.write(documentation)
+    except Exception as e:
+        return f"Error updating compulsory manual: {e}"
         
     try:
         if action == "list":
@@ -2104,14 +2235,18 @@ def fix_active_skill(tool_name: str, action: str, file_path: str = None, source_
             
         elif action == "read":
             if not file_path: return "Error: 'file_path' required."
-            path = get_storage_path(active_dir, file_path)
-            # Seamless logic-folder check
-            if not os.path.exists(path):
-                logic_path = get_storage_path(active_dir, "logic", file_path)
-                if os.path.exists(logic_path):
-                    path = logic_path
-                else:
-                    return f"Error: File '{file_path}' not found."
+            if file_path in ["manual", "documentation"]:
+                safe_name = "".join([c if c.isalnum() or c == '_' else "_" for c in tool_name])
+                path = get_storage_path(os.path.dirname(os.path.dirname(active_dir)), f"{safe_name}_manual.md")
+            else:
+                path = get_storage_path(active_dir, file_path)
+                # Seamless logic-folder check
+                if not os.path.exists(path):
+                    logic_path = get_storage_path(active_dir, "logic", file_path)
+                    if os.path.exists(logic_path):
+                        path = logic_path
+                    else:
+                        return f"Error: File '{file_path}' not found."
             
             with open(path, "r", encoding="utf-8") as f:
                 return f.read()
@@ -2120,11 +2255,15 @@ def fix_active_skill(tool_name: str, action: str, file_path: str = None, source_
             if not file_path: return "Error: 'file_path' required."
             if not source_path and content is None: return "Error: Either 'source_path' or 'content' required for edit action."
             
-            target_path = get_storage_path(active_dir, file_path)
-            
-            # If the file is a code file and we have a logic folder, prioritize it
-            if not os.path.exists(target_path) and os.path.isdir(get_storage_path(active_dir, "logic")):
-                target_path = get_storage_path(active_dir, "logic", file_path)
+            if file_path in ["manual", "documentation"]:
+                safe_name = "".join([c if c.isalnum() or c == '_' else "_" for c in tool_name])
+                target_path = get_storage_path(os.path.dirname(os.path.dirname(active_dir)), f"{safe_name}_manual.md")
+            else:
+                target_path = get_storage_path(active_dir, file_path)
+                
+                # If the file is a code file and we have a logic folder, prioritize it
+                if not os.path.exists(target_path) and os.path.isdir(get_storage_path(active_dir, "logic")):
+                    target_path = get_storage_path(active_dir, "logic", file_path)
             
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
             

@@ -1,5 +1,16 @@
 import sys
 import os
+import time
+
+# --- MILLISECOND-ACCURATE TELEMETRY PROFILER ---
+_START_TIME = time.time()
+
+def log_trace(step: str):
+    elapsed = time.time() - _START_TIME
+    sys.stdout.write(f"[{elapsed:6.2f}s] ⏳ {step}...\n")
+    sys.stdout.flush()
+
+log_trace("Bootstrapping package pathways")
 
 # Ensure package directory is in sys.path to resolve absolute imports of submodules
 package_dir = os.path.dirname(os.path.abspath(__file__))
@@ -10,14 +21,10 @@ import types
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from .env
+log_trace("Loading environment configurations")
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Dependency Injection: 
-# agent.py imports EXT_MAP from textIDE. We mock it here dynamically so 
-# we don't need to modify agent.py or keep textIDE.py around.
-# ---------------------------------------------------------------------------
+log_trace("Setting up TUI TextIDE dependency mockups")
 mock_textIDE = types.ModuleType("textIDE")
 mock_textIDE.EXT_MAP = {
     ".py": "python", ".go": "go", ".c": "c", ".h": "c", 
@@ -32,21 +39,46 @@ import platform
 from pathlib import Path
 
 def get_safe_starting_dir() -> str:
-    """Returns a highly permissive, user-specific safe directory and creates it if missing."""
     if platform.system() == "Windows":
-        # Safe, highly permissive path in the user profile (no admin rights needed)
         path = Path.home() / "FederateWorkspace"
     elif platform.system() == "Darwin": # macOS
         path = Path.home() / "Documents" / "FederateWorkspace"
     else: # Linux / Others
         path = Path.home() / "FederateWorkspace"
     
-    # Automatically create the folder (and any parent folders) if it doesn't exist yet
     path.mkdir(parents=True, exist_ok=True)
     return str(path.absolute())
 
+log_trace("Resolving workspace starting directory")
 SAFE_START_DIR = get_safe_starting_dir()
 
+# Profile Keyring loading separately BEFORE importing agent.py
+# (Since agent.py imports toolbox, which executes keyring checks)
+log_trace("Checking OS Keyring backend (evaluating DBus timeout risk)")
+try:
+    import keyring
+    kr_backend = keyring.get_keyring()
+    log_trace(f"Keyring active backend detected: {type(kr_backend).__name__}")
+except Exception as e:
+    log_trace(f"Keyring trace failed: {e}")
+
+# Profile the sqlite episodic memory DB loading next
+log_trace("Probing episodic memory SQLite database state")
+try:
+    import sqlite3
+    db_path = os.path.join(str(Path.home()), ".federate", "episodic_memory.db")
+    # Open connection to test for disk locking/congestion hangs
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    conn.close()
+    log_trace("SQLite state path verified")
+except Exception as e:
+    log_trace(f"SQLite trace failed: {e}")
+
+log_trace("Compiling AIAgentView core components and NLP imports")
+# This is where agent.py gets imported, which loads LangChain, Textual, etc.
+from agent import AIAgentView
+
+log_trace("Initializing Textual TUI wrapper framework")
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, Horizontal
@@ -54,9 +86,7 @@ from textual.widgets import Header, Footer, DirectoryTree, Label, Button
 from textual.screen import ModalScreen
 from textual import on
 
-# Import the unmodified agent view
-from agent import AIAgentView
-
+log_trace("Building standard tool configurations")
 # Required for agent's execute_code tool since textIDE is stripped away
 DEFAULT_RUN_CONFIGS = {
     "python": {"executable": "python", "flags": "-u \"{file}\""},
@@ -65,6 +95,9 @@ DEFAULT_RUN_CONFIGS = {
     "cpp": {"executable": "g++", "flags": "\"{file}\" -o \"{file_no_ext}\" && \"{file_no_ext}\""},
     "rust": {"executable": "rustc", "flags": "\"{file}\" && \"{file_no_ext}\""},
     "javascript": {"executable": "node", "flags": "\"{file}\""},
+    "bash": {"executable": "bash" if os.name != "nt" else "sh", "flags": "\"{file}\""},
+    "batch": {"executable": "cmd.exe" if os.name == "nt" else "echo", "flags": "/c \"{file}\"" if os.name == "nt" else "\"Batch files are not natively supported on this OS.\""},
+    "powershell": {"executable": "powershell" if os.name == "nt" else "pwsh", "flags": "-ExecutionPolicy Bypass -File \"{file}\""},
 }
 
 class ExplorerTree(DirectoryTree):
@@ -187,6 +220,7 @@ class Federate(App):
         self.run_configs = {k: v.copy() for k, v in DEFAULT_RUN_CONFIGS.items()}
     
     def on_mount(self):
+        self.theme = "tokyo-night"
         try:
             import os
             os.chdir(self.query_one("#dir_tree").path)
@@ -256,6 +290,7 @@ class Federate(App):
         self.push_screen(DirectoryModal(current_path), handle_dir_selection)
 
 def main():
+    log_trace("Spawning standard Textual Application loop")
     app = Federate()
     app.run()
 

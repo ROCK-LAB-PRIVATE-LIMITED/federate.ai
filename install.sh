@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-#            Federate.AI Unified Cross-Platform Installer Script
+#            Federate Unified Cross-Platform Installer Script
 # ==============================================================================
 # Supported Platforms:
 # - macOS (Intel x86_64 & Apple Silicon ARM64)
@@ -11,7 +11,7 @@
 set -e
 
 echo "======================================================================"
-echo "          Federate.AI Universal uv-Based Installer Bootstrapper        "
+echo "          Federate Universal uv-Based Installer Bootstrapper        "
 echo "======================================================================"
 
 # 1. Platform and Shell Detection
@@ -47,15 +47,15 @@ if [ "$IS_WINDOWS_BASH" = true ]; then
     echo "[*] Windows Bash environment detected (Git Bash / MSYS / Cygwin)."
     echo "[*] Transitioning execution context to native Windows PowerShell..."
     
-    # Hand off execution to native Windows PowerShell to bootstrap native Windows binaries on Python 3.12
+    # Hand off execution to native Windows PowerShell to bootstrap native Windows binaries on Python 3.13
     powershell.exe -ExecutionPolicy Bypass -Command "
         Write-Host '[*] Bootstrapping uv on Windows via PowerShell...' -ForegroundColor Cyan
         if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
             irm https://astral.sh/uv/install.ps1 | iex
             \$env:PATH = [System.Environment]::GetEnvironmentVariable('Path', 'User') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
         }
-        Write-Host '[*] Installing Federate.AI on standardized Python 3.12 environment...' -ForegroundColor Cyan
-        uv tool install --python 3.12 'federate[all]'
+        Write-Host '[*] Installing Federate on standardized Python 3.13 environment...' -ForegroundColor Cyan
+        uv tool install --refresh --python 3.13 'federate[all]'
     "
     echo "======================================================================"
     echo " 🎉 Windows installation complete!"
@@ -90,9 +90,9 @@ ensure_uv_unix() {
     echo "[*] uv not detected. Commencing installer..."
 
     if [ "$IS_TERMUX" = true ]; then
-        echo "[*] Installing native Termux package for uv..."
+        echo "[*] Installing native Termux packages for uv and weasyprint dependencies..."
         pkg update -y
-        pkg install -y uv
+        pkg install -y uv pango gobject-introspection libffi pkg-config
     else
         echo "[*] Running official Astral standalone uv installer..."
         curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -104,7 +104,7 @@ ensure_uv_unix() {
     if ! command -v uv &> /dev/null; then
         echo "[!] uv installation could not be verified automatically."
         echo "[*] Please install uv manually (https://docs.astral.sh/uv/) and run:"
-        echo "    uv tool install federate[all]"
+        echo "    uv tool install --refresh federate[all]"
         return 1
     fi
 
@@ -115,44 +115,89 @@ ensure_uv_unix() {
 install_federate_unix() {
     # GitHub repository config parameters for pre-compiled "Tyre" wheels
     REPO_OWNER="ROCK-LAB-PRIVATE-LIMITED"  # <-- CHANGE THIS to your GitHub organization/username
-    REPO_NAME="federate.ai"       # <-- CHANGE THIS to your repository name
+    REPO_NAME="Federate"       # <-- CHANGE THIS to your repository name
     BRANCH="main"
 
-    TYRES_DIR="/tmp/federate_tyres"
+    # Use Termux/Android writable temp directory variable if defined, falling back to /tmp
+    TYRES_DIR="${TMPDIR:-/tmp}/federate_tyres"
     rm -rf "$TYRES_DIR" && mkdir -p "$TYRES_DIR"
     RAW_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}/tyres"
 
     if [ "$IS_TERMUX" = true ]; then
         echo "[*] Android (Termux) environment detected."
-        echo "[*] Downloading precompiled Python 3.12 wheels from tyres folder..."
+        
+        # Clear out any lingering environment variables from previous terminal runs
+        unset UV_FIND_LINKS
 
-        WHEELS=(
-            "numpy-2.4.4-cp312-cp312-android_24_arm64_v8a.whl"
-        )
+        # Ensure weasyprint system dependencies are present even if uv was already installed
+        echo "[*] Ensuring required system packages are installed..."
+        pkg install -y pango gobject-introspection libffi pkg-config tree-sitter-python tree-sitter-go tree-sitter-rust tree-sitter-c tree-sitter-bash
 
-        DOWNLOAD_SUCCESS=false
-        for wheel in "${WHEELS[@]}"; do
-            echo "    [*] Downloading: $wheel"
-            if curl -LsSf "$RAW_URL/$wheel" -o "$TYRES_DIR/$wheel"; then
-                echo "        [+] Success: Local binary cached."
-                DOWNLOAD_SUCCESS=true
-            else
-                echo "        [!] Warning: Precompiled binary not found."
-            fi
-        done
+        # 1. Define a safe working directory in Termux home space for dummy builds
+        BUILD_DIR="$HOME/.tmp_sqlite_vec_build"
+        rm -rf "$BUILD_DIR"
+        mkdir -p "$BUILD_DIR/sqlite_vec"
 
+        echo "    [*] Creating dummy sqlite-vec package structures to bypass compilation..."
+        touch "$BUILD_DIR/README.md"
+        touch "$BUILD_DIR/sqlite_vec/__init__.py"
+        cat << 'EOF' > "$BUILD_DIR/pyproject.toml"
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sqlite-vec"
+version = "0.1.9"
+description = "Dummy package to trick the Android environment resolver"
+readme = "README.md"
+requires-python = ">=3.8"
+EOF
+
+        echo "    [*] Building platform-agnostic universal wheel for sqlite-vec..."
+        (cd "$BUILD_DIR" && uv build --wheel)
+        
+        # Copy the dummy wheel to TYRES_DIR so we only need one find-links directory
+        cp "$BUILD_DIR/dist/"*.whl "$TYRES_DIR/" 2>/dev/null || true
+
+        echo "    [*] Downloading precompiled Python 3.13 wheels from tyres folder..."
+
+        DOWNLOAD_SUCCESS=true
+        
+        export ANDROID_API_LEVEL=19
         if [ "$DOWNLOAD_SUCCESS" = true ]; then
-            echo "[*] Installing Federate with full extras [all] using pre-compiled wheels on Python 3.12..."
-            uv tool install --python 3.12 --find-links "$TYRES_DIR" "federate[all]"
+            echo "[*] Installing Federate with full extras [all] using pre-compiled wheels on Python 3.13..."
+            uv tool install --refresh --python 3.13 \
+                --find-links "$TYRES_DIR" \
+                --find-links "https://geoarkadeep.github.io/Tyres/" \
+                --with pycryptodome \
+                --with tree-sitter \
+                --with keyrings.alt \
+                --with weasyprint \
+                "federate"
         else
             echo "[!] Pre-compiled wheels not found."
             echo "[!] Falling back to basic installation (no extras) to prevent compilation hangs."
-            uv tool install --python 3.12 federate
+            uv tool install --refresh --python 3.13 \
+                --with pycryptodome \
+                --with tree-sitter \
+                --with tree-sitter-python \
+                --with tree-sitter-go \
+                --with tree-sitter-c \
+                --with keyrings.alt \
+                --with weasyprint \
+                federate
         fi
+        
+        # Ensure the executable directory is added to the Termux path permanently
+        grep -qF ".local/bin" ~/.bashrc 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+        
+        unset UV_FIND_LINKS
+        rm -rf "$BUILD_DIR"
 
     elif [ "$OS_NAME" = "Linux" ] && [ "$IS_ARM" = true ]; then
         echo "[*] Linux ARM64 (aarch64) environment detected."
-        echo "[*] Downloading precompiled Python 3.12 wheels from tyres folder..."
+        echo "[*] Downloading precompiled Python 3.13 wheels from tyres folder..."
 
         WHEELS=(
             "numpy-2.4.4-cp312-cp312-manylinux2014_aarch64.whl"
@@ -170,19 +215,19 @@ install_federate_unix() {
         done
 
         if [ "$DOWNLOAD_SUCCESS" = true ]; then
-            echo "[*] Installing Federate with full extras [all] using pre-compiled wheels on Python 3.12..."
-            uv tool install --python 3.12 --find-links "$TYRES_DIR" "federate[all]"
+            echo "[*] Installing Federate with full extras [all] using pre-compiled wheels on Python 3.13..."
+            uv tool install --refresh --python 3.13 --find-links "$TYRES_DIR" "federate[all]"
         else
             echo "[!] Pre-compiled wheels not found."
             echo "[!] Falling back to basic installation (no extras) to prevent compilation hangs."
-            uv tool install --python 3.12 federate
+            uv tool install --refresh --python 3.13 federate
         fi
 
     else
-        # macOS, WSL, or standard Linux (x86_64) - Standardized on Python 3.12
+        # macOS, WSL, or standard Linux (x86_64) - Standardized on Python 3.13
         echo "[*] Desktop/Server environment detected."
-        echo "[*] Installing Federate with all features on standardized Python 3.12 environment..."
-        uv tool install --python 3.12 "federate[all]"
+        echo "[*] Installing Federate with all features on standardized Python 3.13 environment..."
+        uv tool install --refresh --python 3.13 "federate[all]"
     fi
 
     # Clean up cached binaries

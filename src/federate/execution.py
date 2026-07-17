@@ -41,6 +41,9 @@ DEFAULT_RUN_CONFIGS = {
     "fortran": {"executable": "gfortran", "flags": "\"{file}\" -o \"{file_no_ext}\" && \"{file_no_ext}\""},
     "nim": {"executable": "nim", "flags": "c -r \"{file}\""},
     "zig": {"executable": "zig", "flags": "run \"{file}\""},
+    "bash": {"executable": "bash" if os.name != "nt" else "sh", "flags": "\"{file}\""},
+    "batch": {"executable": "cmd.exe" if os.name == "nt" else "echo", "flags": "/c \"{file}\"" if os.name == "nt" else "\"Batch files are not natively supported on this OS.\""},
+    "powershell": {"executable": "powershell" if os.name == "nt" else "pwsh", "flags": "-ExecutionPolicy Bypass -File \"{file}\""},
 }
 
 class SettingsModal(ModalScreen[dict]):
@@ -112,14 +115,16 @@ class TerminalEmulator(VerticalScroll, can_focus=True):
     #render_text { 
         width: 100%; 
         height: auto; /* Allow text to grow */
+        padding-bottom: 2;
     }
     """
 
-    def __init__(self, file_path: str, executable: str, flags: str, **kwargs):
+    def __init__(self, file_path: str, executable: str, flags: str, venv_path: str = None, **kwargs):
         super().__init__(**kwargs)
         self.file_path = file_path
         self.executable = executable
         self.flags = flags
+        self.venv_path = venv_path
         
         self.process = None
         self.pty_master = None
@@ -143,20 +148,36 @@ class TerminalEmulator(VerticalScroll, can_focus=True):
         file_no_ext = os.path.splitext(self.file_path)[0]
         try:
             formatted_flags = self.flags.format(file=self.file_path, file_no_ext=file_no_ext)
-            cmd = f"{self.executable} {formatted_flags}"
+            run_cmd = f"\"{self.executable}\" {formatted_flags}"
         except KeyError as e:
             self.app.call_from_thread(self._write_raw, f"Configuration error: invalid variable {e}\n")
             return
 
-        self.app.call_from_thread(self._write_raw, f"🚀 Executing: {cmd}\n{'-'*40}\n")
+        # Resolve user's actual macOS shell (defaulting to bash)
+        shell_cmd = "cmd.exe" if sys.platform == "win32" else os.environ.get("SHELL", "bash")
+        self.app.call_from_thread(self._write_raw, f"🚀 Launching Shell: {shell_cmd}\n{'-'*40}\n")
         
         env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1" # Ensures python output streams instantly
+        env["PYTHONUNBUFFERED"] = "1"
+        
+        newline = "\r\n" if sys.platform == "win32" else "\n"
+        startup_payload = ""
+        if self.venv_path:
+            if sys.platform == "win32":
+                activate_script = os.path.join(self.venv_path, "Scripts", "activate.bat")
+                startup_payload += f"call \"{activate_script}\"{newline}"
+            else:
+                activate_script = os.path.join(self.venv_path, "bin", "activate")
+                startup_payload += f"source \"{activate_script}\"{newline}"
+                
+        startup_payload += f"cd \"{os.path.dirname(self.file_path)}\"{newline}"
+        startup_payload += f"{run_cmd}{newline}"
 
         try:
             if sys.platform == "win32" and HAS_PYWINPTY:
                 self.winpty_proc = pywinpty.PTY(120, 30)
-                self.winpty_proc.spawn(None, cmdline=cmd, cwd=os.path.dirname(self.file_path), env=env)
+                self.winpty_proc.spawn(None, cmdline=shell_cmd, cwd=os.path.dirname(self.file_path), env=env)
+                self.winpty_proc.write(startup_payload)
                 
                 while self._process_active:
                     try:
@@ -169,14 +190,17 @@ class TerminalEmulator(VerticalScroll, can_focus=True):
             elif HAS_PTY:
                 master, slave = pty.openpty()
                 self.pty_master = master
-                winsize = struct.pack("HHHH", 30, 120, 0, 0) # Force dimension so tqdm calculates bars!
+                winsize = struct.pack("HHHH", 30, 120, 0, 0)
                 fcntl.ioctl(master, termios.TIOCSWINSZ, winsize)
                 
+                # Direct invocation (shell=False) passing '-i' (interactive) keeps macOS zsh alive
                 self.process = subprocess.Popen(
-                    cmd, shell=True, stdin=slave, stdout=slave, stderr=slave, 
+                    [shell_cmd, "-i"], shell=False, stdin=slave, stdout=slave, stderr=slave, 
                     cwd=os.path.dirname(self.file_path), env=env
                 )
                 os.close(slave) 
+                
+                os.write(master, startup_payload.encode('utf-8'))
 
                 while self._process_active:
                     try:
@@ -191,10 +215,13 @@ class TerminalEmulator(VerticalScroll, can_focus=True):
             else:
                 self.app.call_from_thread(self._write_raw, "[WARNING: PTY libraries missing. Interactive execution limited.]\n")
                 self.process = subprocess.Popen(
-                    cmd, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
+                    shell_cmd, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
                     cwd=os.path.dirname(self.file_path), env=env
                 )
                 self._stdin = self.process.stdin
+                self._stdin.write(startup_payload.encode('utf-8'))
+                self._stdin.flush()
+                
                 while self._process_active:
                     data = self.process.stdout.read(1)
                     if not data: break
@@ -203,7 +230,7 @@ class TerminalEmulator(VerticalScroll, can_focus=True):
                 self.process.wait()
 
             return_code = self.process.returncode if self.process else getattr(self.winpty_proc, 'get_exitstatus', lambda: 0)()
-            self.app.call_from_thread(self._write_raw, f"\n{'-'*40}\nProcess finished with exit code {return_code}\n")
+            self.app.call_from_thread(self._write_raw, f"\n{'-'*40}\nShell session finished with exit code {return_code}\n")
 
         except Exception as e:
             self.app.call_from_thread(self._write_raw, f"\nExecution error: {e}\n")
@@ -295,14 +322,14 @@ class ExecutionManager(Vertical):
         with TabbedContent(id="exec_tabs"):
             yield TabPane("Idle", Label("\n   No active executions.\n   Press Ctrl+R in the editor to run a file.", id="idle_label"), id="idle_pane")
 
-    def start_run(self, file_path: str, executable: str, flags: str, run_id: int):
+    def start_run(self, file_path: str, executable: str, flags: str, run_id: int, venv_path: str = None):
         tabs = self.query_one("#exec_tabs", TabbedContent)
         
         try: tabs.remove_pane("idle_pane")
         except Exception: pass
         
         pane_id = f"run_pane_{run_id}"
-        term = TerminalEmulator(file_path, executable, flags, id=f"term_{run_id}")
+        term = TerminalEmulator(file_path, executable, flags, venv_path=venv_path, id=f"term_{run_id}")
         pane = TabPane(f"{os.path.basename(file_path)} #{run_id}", term, id=pane_id)
         
         tabs.add_pane(pane)
@@ -318,13 +345,108 @@ class ExecutionManager(Vertical):
             try:
                 term = self.query_one(f"#{active}", TabPane).query_children(TerminalEmulator).first()
                 term.terminate()
+            except Exception: pass
+            
+            # Synchronously check active run panes prior to scheduled removal
+            run_panes = [pane for pane in tabs.query(TabPane) if pane.id.startswith("run_pane_")]
+            is_last = len(run_panes) <= 1
+            
+            try:
                 tabs.remove_pane(active)
             except Exception: pass
             
-            # If no Tabs are left, show idle screen again
-            if len(tabs.query(TabPane)) == 0:
+            # If this was the last running script, restore the Idle state and signal autoclose
+            if is_last:
                 tabs.add_pane(TabPane("Idle", Label("\n   No active executions.\n   Press Ctrl+R in the editor to run a file.", id="idle_label"), id="idle_pane"))
                 tabs.active = "idle_pane"
                 return False
             return True
         return False
+        
+class VenvManagerModal(ModalScreen[str]):
+    DEFAULT_CSS = """
+    VenvManagerModal { align: center middle; background: $background 60%; }
+    #venv_dialog { width: 60; height: auto; border: round $primary; background: $surface; padding: 1 2; }
+    .form_row { margin-bottom: 1; }
+    .buttons { height: auto; align: right middle; margin-top: 1; }
+    .buttons Button { margin-left: 1; }
+    """
+
+    def __init__(self, venv_root: str, current_active: str):
+        super().__init__()
+        self.venv_root = venv_root
+        self.current_active = current_active
+
+    def compose(self) -> ComposeResult:
+        options = []
+        default_path = os.path.join(self.venv_root, "defaultVenv")
+        if os.path.exists(default_path):
+            options.append(("defaultVenv", "defaultVenv"))
+        
+        # 1. Auto-detect local workspace virtual environments (.venv or venv)
+        try:
+            from toolbox import CURRENT_APP
+            if CURRENT_APP:
+                workspace_dir = str(CURRENT_APP.query_one("#dir_tree").path)
+                for local_name in [".venv", "venv"]:
+                    local_path = os.path.abspath(os.path.join(workspace_dir, local_name))
+                    if os.path.isdir(local_path):
+                        options.append((f"Workspace {local_name} ({local_path})", local_path))
+        except Exception: pass
+
+        # 2. List global venvs inside .federate
+        if os.path.exists(self.venv_root):
+            try:
+                for d in sorted(os.listdir(self.venv_root)):
+                    if d != "defaultVenv" and os.path.isdir(os.path.join(self.venv_root, d)):
+                        options.append((f"Global: {d}", d))
+            except Exception: pass
+        
+        with Vertical(id="venv_dialog"):
+            yield Label("🐍 UV Virtual Env Manager", classes="pane_title")
+            yield Label(f"Current Active: [bold green]{self.current_active}[/]")
+            yield Select(options, id="venv_select", prompt="Switch Active Venv...")
+            
+            yield Label("\nOr Activate Existing Venv Path:")
+            yield Input(placeholder="/path/to/existing/venv", id="direct_venv_path", classes="form_row")
+            
+            yield Label("\nCreate New Venv:")
+            yield Input(placeholder="Venv Name", id="new_venv_name", classes="form_row")
+            yield Input(placeholder="Python Version (optional, e.g. 3.11)", id="new_venv_version", classes="form_row")
+            yield Input(placeholder="Absolute Create Path (optional, defaults to .federate)", id="new_venv_path", classes="form_row")
+            
+            with Horizontal(classes="buttons"):
+                yield Button("Create", id="create_btn", variant="success")
+                yield Button("Default", id="default_btn", variant="warning")
+                yield Button("Cancel", id="cancel_btn", variant="error")
+
+    @on(Button.Pressed)
+    def handle_buttons(self, event: Button.Pressed):
+        btn_id = event.button.id
+        if btn_id == "cancel_btn":
+            self.dismiss(None)
+        elif btn_id == "default_btn":
+            self.dismiss("default")
+        elif btn_id == "create_btn":
+            name = self.query_one("#new_venv_name", Input).value.strip()
+            version = self.query_one("#new_venv_version", Input).value.strip() or None
+            path = self.query_one("#new_venv_path", Input).value.strip() or None
+            if name or path:
+                self.dismiss({"action": "create", "name": name, "version": version, "path": path})
+            else:
+                self.notify("Please enter a name or path to create.", severity="error")
+                
+    @on(Input.Submitted, "#direct_venv_path")
+    def on_direct_path_submitted(self):
+        direct_path = self.query_one("#direct_venv_path", Input).value.strip()
+        if direct_path:
+            resolved = os.path.abspath(direct_path)
+            if os.path.isdir(resolved):
+                self.dismiss({"action": "switch", "name": resolved})
+            else:
+                self.notify("The specified path is not a valid directory.", severity="error")
+
+    @on(Select.Changed, "#venv_select")
+    def on_select_changed(self, event: Select.Changed):
+        if event.value != Select.BLANK:
+            self.dismiss({"action": "switch", "name": str(event.value)})
