@@ -57,10 +57,10 @@ Start the application from your terminal:
 ```bash
 federate
 ```
-*(You can also open a specific project directory directly: `federate path/to/folder`)*
+*(You can also open the last available chat using federate -r)*
 
 ### Basic Setup
-1. Once the interface loads, press **`F4`** to open the **Agent Editor**.
+1. On the first run of Federate, you will be presented with an onboarding popup that will help you setup your first agent.
 2. Set up your active agent, including your API keys and model choices (Federate is pre-configured for OpenRouter, but works with any OpenAI-compatible API). 
 3. Federate will securely encrypt and save your credentials inside your native OS keychain.
 
@@ -77,8 +77,8 @@ To protect your workspace, the system boots in **SAFE** mode. You can use /tools
 * **Slash Commands:** Type / followed by the command. For /help the full list of available commands and their descriptions.
 * **Key Bindings:**
   * **`F2`**: Session Manager (Create a new chat or load historical multi-agent sessions)
-  * **`F4`**: Open the Active Agent configuration
-  * **`F5`**: Cycle the host agent
+  * **`F4`**: Open the Active Agent's configuration
+  * **`F5`**: Change Agent and set the default agent
   * **`F6`**: Cycle through UI panels (Chat ↔ IDE Editor ↔ Executions Dashboard)
   * **`F8`**: Change your workspace directory
   * **`Ctrl+K`**: Start fresh conversation
