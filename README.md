@@ -69,11 +69,12 @@ To protect your workspace, the system boots in **SAFE** mode. You can use /tools
 * Press **`Ctrl+T`** to cycle permissions:
   * **SAFE:** Agents can only call basic tools (web search, deep research and list files). You can authorize more tools in safe mode on a per-agent basis but they will still present a confirmation popup.
   * **SEMI-AUTO:** Agents can edit and execute, but Federate will present a popup asking you to approve every single tool execution.
-  * **FULL-AUTO:** Agents can run autonomous toolchains in the background.
+  * **FULL-AUTO:** Agents can run any and every tool available. No confirmation will be required.
 
 ### Command Reference
 * **Attach Files and Folders:** Type `&` followed by the file path (e.g., `&src/main.py`). Use **`UP/DOWN`** arrow keys to cycle through autocomplete suggestions.
 * **Mention Agents:** Type `@` followed by the agent name to route your message to a specific agent. Use `@team` to broadcast to everyone, or `@room` to talk to agents active in the current session. **Agents can also use @ to invoke other agents,** which is the core of the peer to peer system.
+* **Slash Commands:** Type / followed by the command. For /help the full list of available commands and their descriptions.
 * **Key Bindings:**
   * **`F2`**: Session Manager (Create a new chat or load historical multi-agent sessions)
   * **`F4`**: Open the Active Agent configuration
