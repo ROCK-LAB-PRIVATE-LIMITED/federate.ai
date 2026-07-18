@@ -64,10 +64,10 @@ federate
 2. Set up your active agent, including your API keys and model choices (Federate is pre-configured for OpenRouter, but works with any OpenAI-compatible API). 
 3. Federate will securely encrypt and save your credentials inside your native OS keychain.
 
-### Changing Safety Modes (`Ctrl+T` / `/arm`)
-To protect your workspace, the system boots in **SAFE (PLAN)** mode. In this mode, agents can search the web and read files, but they cannot edit code, run terminal commands, or control your computer.
-* Press **`Ctrl+T`** or type **`/arm`** to cycle permissions:
-  * **SAFE (PLAN):** Read-only. Great for planning and research.
+### Changing Safety Modes (`Ctrl+T`)
+To protect your workspace, the system boots in **SAFE** mode. You can use /tools command to check what tools are available and activated at any time for the current agent.
+* Press **`Ctrl+T`** to cycle permissions:
+  * **SAFE:** Agents can only call basic tools (web search, deep research and list files). You can authorize more tools in safe mode on a per-agent basis but they will still present a confirmation popup.
   * **SEMI-AUTO:** Agents can edit and execute, but Federate will present a popup asking you to approve every single tool execution.
   * **FULL-AUTO:** Agents can run autonomous toolchains in the background.
 
