@@ -89,10 +89,10 @@ To protect your workspace, the system boots in **SAFE (PLAN)** mode. In this mod
 
 ## Why We Built Federate
 
-In many regions of the developing world, owning a desktop computer is often a luxury, yet nearly everyone has access to a smartphone. Federate is written to bring the joy of programming to those pocket-sized screens. It is designed to run natively and comfortably inside **Termux on Android**, transforming a spare smartphone into a fully capable engineering workstation.
+In many regions of the developing world, owning a desktop computer is often a luxury, a lot more people have access to smartphones. Federate is written to bring the joy of programming to as many people as possible, by being as device agnostic as possible. It is designed to run natively and comfortably inside **Termux on Android**, transforming a spare smartphone into a fully capable engineering workstation.
 
-But Federate is also built for the most advanced power-users on high-end hardware. It runs on **any Mac or PC** you can throw at it, unlocking system-level features like desktop automation, local speech-to-text with hotword detection, and text-to-speech voice generation. 
+Federate is also built for advanced power-users on high-end hardware. It runs on **any Mac or PC** you can throw at it, unlocking system-level features like desktop automation, local speech-to-text with hotword detection, and text-to-speech voice generation. 
 
-It is designed to be accessible to everyone, yet incredibly powerful for those with top-tier setups.
+It is designed to be accessible by everyone, while being incredibly powerful for those with top-tier setups.
 
 ---
