@@ -93,6 +93,6 @@ In many regions of the developing world, owning a desktop computer is often a lu
 
 Federate is also built for advanced power-users on high-end hardware. It runs on **any Mac or PC** you can throw at it, unlocking system-level features like desktop automation, local speech-to-text with hotword detection, and text-to-speech voice generation. 
 
-It is designed to be accessible by everyone, while being incredibly powerful for those with top-tier setups.
+It is designed to be accessible by everyone, while being incredibly powerful.
 
 ---
