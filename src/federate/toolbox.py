@@ -41,6 +41,7 @@ DEFAULT_GLOBAL_SETTINGS = {
     "research_min_length": 5000,
     "max_shrink_attempts": 15,
     "pdf_dpi": 150,
+    "keep_verbatim_count": 2,
 }
 
 def load_global_settings() -> dict:
@@ -546,9 +547,28 @@ def load_dynamic_tools(agent_name: str) -> List[StructuredTool]:
                         else:
                             # Keyword Mode: Pass complex objects as JSON strings, simple ones as-is
                             for k, v in kwargs.items():
-                                val_str = json.dumps(v) if isinstance(v, (dict, list)) else str(v)
-                                cmd.extend([f"--{k}", val_str])
+                                # SAFETY NORMALIZATION: Strip any leading dashes from the key
+                                clean_k = k.lstrip("-")
+                                
+                                # SMART FLAG PARSING: If value is boolean, treat as standard CLI switch/flag
+                                if isinstance(v, bool):
+                                    if v:
+                                        cmd.append(f"--{clean_k}")
+                                # HYBRID LIST GUARD: Unpack simple file/string lists, but keep JSON dumps for complex nested arrays
+                                elif isinstance(v, list):
+                                    if all(isinstance(item, (str, int, float)) for item in v):
+                                        cmd.append(f"--{clean_k}")
+                                        cmd.extend([str(item) for item in v])
+                                    else:
+                                        val_str = json.dumps(v)
+                                        cmd.extend([f"--{clean_k}", val_str])
+                                else:
+                                    val_str = json.dumps(v) if isinstance(v, dict) else str(v)
+                                    cmd.extend([f"--{clean_k}", val_str])
                         # --------------------------------------
+
+                        # Print actual executed command to the logging feed
+                        log_tool(f"Command: [dim]{' '.join(cmd)}[/]")
 
                         proc = subprocess.Popen(
                             cmd,
@@ -2058,6 +2078,17 @@ def prepare_active_skill(tool_name: str, source_paths: List[str], entry_point: s
         
         # --- ARGUMENT PASSING: Hybrid Logic ---
         if arg_order:
+            # SAFETY CHECK: Catch partial arg_order configurations before running
+            mismatched = [k for k in test_input.keys() if k not in arg_order]
+            if mismatched:
+                return (
+                    f"Error: Parameter(s) {mismatched} were provided in 'test_input' "
+                    f"but are missing from your specified 'arg_order' list: {arg_order}.\n"
+                    f"To fix this:\n"
+                    f"- If you want to use Positional Mode, every parameter in 'test_input' must have a position defined in 'arg_order'.\n"
+                    f"- If you want to use Keyword Mode (passing flags like --param), do NOT specify an 'arg_order' list at all."
+                )
+
             for arg_name in arg_order:
                 val = test_input.get(arg_name)
                 if val is not None:
@@ -2069,8 +2100,25 @@ def prepare_active_skill(tool_name: str, source_paths: List[str], entry_point: s
         else:
             # Keyword Mode: Pass complex objects as JSON strings, simple ones as-is
             for k, v in test_input.items():
-                val_str = json.dumps(v) if isinstance(v, (dict, list)) else str(v)
-                cmd.extend([f"--{k}", val_str])
+                # SAFETY NORMALIZATION: Strip any leading dashes from the key to prevent "----flag" compounding
+                clean_k = k.lstrip("-")
+                
+                # SMART FLAG PARSING: If value is boolean, treat as standard CLI switch/flag (e.g. --info)
+                if isinstance(v, bool):
+                    if v:
+                        cmd.append(f"--{clean_k}")
+                    # If False, omit the flag entirely (standard CLI behavior)
+                elif isinstance(v, list):
+                    # HYBRID LIST GUARD: Unpack simple file/string lists, but keep JSON dumps for complex nested arrays
+                    if all(isinstance(item, (str, int, float)) for item in v):
+                        cmd.append(f"--{clean_k}")
+                        cmd.extend([str(item) for item in v])
+                    else:
+                        val_str = json.dumps(v)
+                        cmd.extend([f"--{clean_k}", val_str])
+                else:
+                    val_str = json.dumps(v) if isinstance(v, dict) else str(v)
+                    cmd.extend([f"--{clean_k}", val_str])
         # --------------------------------------
         
         proc = subprocess.run(cmd, text=True, capture_output=True, cwd=get_storage_path(staging_dir, "logic"), env=env, stdin=subprocess.DEVNULL)
@@ -2080,24 +2128,30 @@ def prepare_active_skill(tool_name: str, source_paths: List[str], entry_point: s
         if isinstance(stdout, bytes): stdout = stdout.decode('utf-8', errors='replace')
         if isinstance(stderr, bytes): stderr = stderr.decode('utf-8', errors='replace')
 
+        # Evaluate Test Success
+        test_passed = False
+        executed_cmd = " ".join(cmd)
+        result = f"--- TEST RUN RESULTS ({tool_name}) ---\nCOMMAND EXECUTED:\n{executed_cmd}\n\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}\n\n"
+        if proc.returncode == 0:
+            if not stdout.strip():
+                result += "FAILURE: Tool executed with exit code 0 but returned EMPTY stdout. A valid tool must print some output or confirmation to STDOUT during the test validation run."
+            else:
+                test_passed = True
+                result += "SUCCESS: Tool executed correctly. Call 'finalize_active_skill' to register it."
+        else:
+            result += f"FAILURE: Tool exited with code {proc.returncode}. Fix the logic and try again."
+
         # Save metadata for Stage 2
         meta = {
             "entry_point": entry_point, 
             "dependencies": dependencies or [],
             "custom_dependency_paths": custom_dependency_paths or [],
-            "pre_install_commands": pre_install_commands or []
+            "pre_install_commands": pre_install_commands or [],
+            "test_passed": test_passed
         }
         with open(get_storage_path(staging_dir, "metadata.json"), "w") as f:
             json.dump(meta, f)
             
-        result = f"--- TEST RUN RESULTS ({tool_name}) ---\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}\n\n"
-        if proc.returncode == 0:
-            if not stdout.strip():
-                result += "FAILURE: Tool executed with exit code 0 but returned EMPTY stdout. A valid tool must print some output or confirmation to STDOUT during the test validation run."
-            else:
-                result += "SUCCESS: Tool executed correctly. Call 'finalize_active_skill' to register it."
-        else:
-            result += f"FAILURE: Tool exited with code {proc.returncode}. Fix the logic and try again."
         return result
         
     except subprocess.CalledProcessError as e:
@@ -2139,6 +2193,17 @@ def finalize_active_skill(tool_name: str, tool_description: str, usage_guide: st
     if not os.path.exists(staging_dir):
         return f"Error: Tool '{tool_name}' is not in staging. Call 'prepare_active_skill' first."
         
+    # --- HARD GUARDRAIL: Prevent finalizing broken tools ---
+    meta_path = get_storage_path(staging_dir, "metadata.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            if not meta.get("test_passed", False):
+                return f"Error: 🚨 HARD GUARDRAIL ACTIVATED 🚨\nTool '{tool_name}' FAILED its validation test during `prepare_active_skill`. You are strictly prohibited from finalizing a broken tool. You MUST fix the logic and run `prepare_active_skill` again until it yields a SUCCESS result."
+        except Exception:
+            pass
+
     try:
         # 1. Create schema.json
         schema = {
@@ -2182,11 +2247,11 @@ def finalize_active_skill(tool_name: str, tool_description: str, usage_guide: st
         return f"Error finalizing skill: {e}"
 
 @tool
-def fix_active_skill(tool_name: str, action: str, documentation: str, file_path: str = None, source_path: str = None, content: str = None, commit_message: str = None, dependencies: List[str] = None, config: RunnableConfig = None) -> str:
+def fix_active_skill(tool_name: str, action: str, documentation: str, tool_description: str, parameters: Dict[str, Any], file_path: str = None, source_path: str = None, content: str = None, commit_message: str = None, dependencies: List[str] = None, arg_order: List[str] = None, config: RunnableConfig = None) -> str:
     """
     Allows editing and maintaining an existing Active Skill with automatic version control.
-    Compulsorily requires the latest documentation manual for the active skill to be provided.
-    If nothing changed in the manual, simply provide the current/old documentation again.
+    Compulsorily requires the latest documentation manual, tool description, and parameters schema for the active skill to be provided on every call.
+    If nothing changed, simply provide the current/old data again.
     
     Actions:
     - 'list': List all files in the tool's directory.
@@ -2199,11 +2264,16 @@ def fix_active_skill(tool_name: str, action: str, documentation: str, file_path:
         tool_name: The tool to maintain.
         action: The action to perform (list, read, edit, install, commit).
         documentation: The full, up-to-date manual/documentation for the skill (compulsory).
+        tool_description: The full, up-to-date description of what the tool does (compulsory). This cannot be a placeholder (such as "updated description" or "test"). It must be a detailed, descriptive summary.
+        parameters: The full, up-to-date JSON schema of parameters/arguments (compulsory).
         file_path: The target file inside the tool's library (e.g., 'script.py').
         source_path: For 'edit' action: A path to a file in your workspace to copy from.
         content: For 'edit' action: A string of code to write directly.
         dependencies: For 'install' action: A list of pip packages.
+        arg_order: Optional sequence list for positional arguments to update schema.json.
     """
+    if len(tool_description.strip()) < 50:
+        return "Error: The 'tool_description' must be a detailed, descriptive summary explaining what the tool does. Placeholder descriptions are strictly prohibited."
     agent_name = _get_agent(config)
     safe_agent_name = agent_name.replace(" ", "_")
     active_dir = get_storage_path("agents", "skills", safe_agent_name, "active_tools", tool_name)
@@ -2219,6 +2289,32 @@ def fix_active_skill(tool_name: str, action: str, documentation: str, file_path:
             f.write(documentation)
     except Exception as e:
         return f"Error updating compulsory manual: {e}"
+        
+    # Compulsorily update schema.json with the provided schema and description on every call
+    try:
+        schema_path = get_storage_path(active_dir, "schema.json")
+        schema_data = {}
+        if os.path.exists(schema_path):
+            try:
+                with open(schema_path, "r", encoding="utf-8") as f:
+                    schema_data = json.load(f)
+            except Exception:
+                pass
+        
+        schema_data["name"] = tool_name
+        schema_data["description"] = tool_description
+        schema_data["parameters"] = parameters
+        if arg_order is not None:
+            schema_data["arg_order"] = arg_order
+        
+        os.makedirs(os.path.dirname(schema_path), exist_ok=True)
+        with open(schema_path, "w", encoding="utf-8") as f:
+            json.dump(schema_data, f, indent=4)
+        
+        subprocess.run(["git", "add", "schema.json"], cwd=active_dir, capture_output=True)
+        subprocess.run(["git", "-c", "user.name='Maven'", "-c", "user.email='maven@internal'", "commit", "-m", f"Compulsory update of schema.json for {tool_name}"], cwd=active_dir, capture_output=True)
+    except Exception as e:
+        return f"Error updating compulsory schema.json: {e}"
         
     try:
         if action == "list":
@@ -2279,7 +2375,7 @@ def fix_active_skill(tool_name: str, action: str, documentation: str, file_path:
             git_rel_path = os.path.relpath(target_path, active_dir)
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             subprocess.run(["git", "add", git_rel_path], cwd=active_dir, check=True, capture_output=True)
-            subprocess.run(["git", "commit", "-m", f"Auto-update: {file_path} @ {timestamp}"], cwd=active_dir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", f"Auto-update: {file_path} @ {timestamp}"], cwd=active_dir, check=False, capture_output=True)
             
             return f"File '{file_path}' has been replaced (from {'workspace' if source_path else 'string'}) and committed automatically."
 

@@ -252,24 +252,34 @@ def process_slash_command(command: str, agent_view):
         agent_view.log_to_ui("Analyzing chat history for technical compression...", is_markdown=False)
         from orchestration import HistoryMessage
         from langchain_openai import ChatOpenAI
-        from langchain_core.messages import SystemMessage
+        from langchain_core.messages import SystemMessage, HumanMessage
         
+        # Load the single user setting from global settings
+        from toolbox import load_global_settings
+        global_config = load_global_settings()
+        keep_verbatim_count = int(global_config.get("keep_verbatim_count", 2))
+        
+        # Automatically calculate the mathematically safe minimum threshold (T = V + 2)
+        comp_threshold = keep_verbatim_count + 2
+
         history = agent_view.session_manager.active_sessions.get(agent_view.active_agent.name, [])
-        # Ensure there is enough history to compress safely (system prompt + more than 5 dialogue turns)
-        if len(history) <= 6:
-            agent_view.log_to_ui("Chat history is too short to compress safely.", is_markdown=False)
+        # Ensure there is enough history to compress safely
+        if len(history) <= comp_threshold:
+            agent_view.log_to_ui(f"Chat history is too short to compress safely (requires > {comp_threshold} turns).", is_markdown=False)
             return
 
-        # Keep the system prompt (history[0]) and the last 4 messages verbatim
-        keep_verbatim_count = 4
         to_summarize = history[1:-keep_verbatim_count]
         verbatim_suffix = history[-keep_verbatim_count:]
         
-        # Format the intermediate history to feed to the LLM
+        # Format the intermediate history to feed to the LLM (Including tool_outputs now!)
         formatted_history = []
         for msg in to_summarize:
             role_disp = "User" if msg.role == "human" else "Agent"
-            formatted_history.append(f"[{role_disp}]: {msg.content}")
+            msg_text = msg.content or ""
+            if getattr(msg, "tool_outputs", None):
+                for out in msg.tool_outputs:
+                    msg_text += f"\n[Tool {out.get('name', 'Unknown')} Output]: {out.get('content', '')}"
+            formatted_history.append(f"[{role_disp}]: {msg_text}")
         history_text = "\n".join(formatted_history)
         
         # Instantiate the active agent's LLM credentials
@@ -290,32 +300,103 @@ def process_slash_command(command: str, agent_view):
         try:
             llm = ChatOpenAI(model=model, api_key=api_key, base_url=base_url, temperature=0)
             
-            # Instruct the LLM to build a technically precise, dense summary
+            # 1. Extract Image Tags for Multimodal Compression
+            import re, base64, mimetypes, time
+            extracted_image_tags = []
+            vision_payload = []
+            
+            # Attached Images
+            for m in re.finditer(r'\[Attached Image:\s*(.*?)\]', history_text):
+                tag = m.group(0)
+                filepath = m.group(1).strip()
+                if tag not in extracted_image_tags:
+                    extracted_image_tags.append(tag)
+                    if agent.is_capable_vision and os.path.exists(filepath) and os.path.getsize(filepath) > 0 and not filepath.lower().endswith(".pdf"):
+                        try:
+                            mime = mimetypes.guess_type(filepath)[0] or "image/png"
+                            with open(filepath, "rb") as img_f:
+                                b64 = base64.b64encode(img_f.read()).decode('utf-8').replace('\n', '').replace('\r', '')
+                            vision_payload.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+                        except Exception:
+                            pass
+
+            # Base64 Images - Convert to actual files so they survive compression cleanly
+            compress_dir = os.path.join(agent_view.session_manager.sessions_dir, "compressed_images")
+            os.makedirs(compress_dir, exist_ok=True)
+            
+            for m in re.finditer(r'\[ImageBase64:\s*(data:image/([a-zA-Z]+);base64,([^\]]+))\]', history_text):
+                tag = m.group(0)
+                full_data = m.group(1).strip().replace("\n", "").replace("\r", "").replace(" ", "")
+                ext = m.group(2)
+                b64_data = m.group(3).strip().replace("\n", "").replace("\r", "").replace(" ", "")
+                
+                if any(marker in full_data for marker in ["{", "}", "<", ">", "b64_str", "base64data"]):
+                    continue
+                    
+                new_filename = f"compressed_{int(time.time() * 1000)}_{len(extracted_image_tags)}.{ext}"
+                new_filepath = os.path.join(compress_dir, new_filename)
+                
+                try:
+                    with open(new_filepath, "wb") as f:
+                        f.write(base64.b64decode(b64_data))
+                    
+                    new_tag = f"[Attached Image: {new_filepath}]"
+                    if new_tag not in extracted_image_tags:
+                        extracted_image_tags.append(new_tag)
+                        if agent.is_capable_vision:
+                            vision_payload.append({"type": "image_url", "image_url": {"url": full_data}})
+                except Exception:
+                    pass
+                        
+            # Strip giant base64 payloads from the text prompt to save tokens
+            history_text = re.sub(r'\[ImageBase64:\s*data:image/[a-zA-Z]+;base64,[^\]]+\]', '[ImageBase64: <data_transmitted>]', history_text)
+            
+            # 2. Instruct the LLM to build a first-person, technically precise summary
             comp_prompt = f"""
-            You are a system context compressor. Analyze the intermediate conversation history below.
-            Generate a dense, technical, and precise Markdown state summary.
+            You are {agent.name}. {agent.backstory}
+            You are summarizing YOUR OWN conversation history to save memory.
+            Write the summary from your own first-person perspective ("I", "my") so that when you read it later, you seamlessly remember what YOU did, what you saw, and what the User said.
+            
+            Analyze the intermediate conversation history below. Generate a dense, technical, and precise Markdown state summary.
             
             The summary MUST capture:
             1. Active project paths, files being edited, and exact workspace parameters.
             2. Hard technical decisions made and agreed-upon designs/architectures.
             3. Discovered issues, constraints, errors, or dependencies.
             4. User preferences, goals, and pending tasks.
-            5. Any facts established in the conversation so far.
+            5. Any facts or visual details established in the conversation so far.
             
-            Do not lose technical specificity (such as exact filenames, functions, paths, or keys).
+            If you see a message starting with [SYSTEM HISTORICAL RECALL SUMMARY] then understand this conversation has been summarized before. 
+            Consider how the conversation has progressed since the last summary and construct your current summary such that all the details of the older summary are retained while updating it with the progress made since then.
+            
+            Do not lose technical specificity (such as exact filenames, code, functions, paths, or keys).
             
             CONVERSATION TO SUMMARIZE:
             {history_text}
             """
             
-            res = llm.invoke([SystemMessage(content=comp_prompt)])
+            if agent.is_capable_vision and vision_payload:
+                content_list = [{"type": "text", "text": comp_prompt}]
+                content_list.extend(vision_payload)
+                msg_to_send = HumanMessage(content=content_list)
+            else:
+                msg_to_send = HumanMessage(content=comp_prompt)
+            
+            res = llm.invoke([msg_to_send])
             summary_content = f"### [SYSTEM HISTORICAL RECALL SUMMARY]\n{res.content}"
             
             # Package the summary
             summary_message = HistoryMessage(role="ai", content=summary_content)
             
-            # Reconstruct the history: [System Prompt] + [Summary] + [Verbatim Suffix]
-            new_history = [history[0], summary_message] + verbatim_suffix
+            # 3. Create a companion HumanMessage for the surviving images so the AI can "see" them natively
+            if extracted_image_tags:
+                image_message = HistoryMessage(
+                    role="human", 
+                    content="### [Images preserved from compressed history]\n" + "\n".join(extracted_image_tags)
+                )
+                new_history = [history[0], summary_message, image_message] + verbatim_suffix
+            else:
+                new_history = [history[0], summary_message] + verbatim_suffix
             
             # Save shrunken history
             agent_view.session_manager.active_sessions[agent_view.active_agent.name] = new_history
@@ -572,15 +653,45 @@ def handle_ampersand_commands(prompt: str, agent_view) -> str:
                 return token
         elif os.path.isdir(full_path):
             try:
+                import fnmatch
                 content_accum = []
                 processed_files = []
-                ignore_dirs = {'.git', 'node_modules', '__pycache__', 'venv', '.venv', 'dist', 'build'}
+                
+                # Base hardcoded ignore list
+                ignore_patterns = ['.git', 'node_modules', '__pycache__', 'venv', '.venv', 'dist', 'build', '.idea', '.vscode', '.env']
+                
+                # Load project-level .gitignore or .listignore rules
+                for ignore_file in ('.gitignore', '.listignore'):
+                    ignore_path = os.path.join(base_dir, ignore_file)
+                    if os.path.exists(ignore_path):
+                        try:
+                            with open(ignore_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if line and not line.startswith('#'):
+                                        if line.endswith('/'):
+                                            line = line[:-1]
+                                        ignore_patterns.append(line.replace('/', os.sep))
+                        except Exception:
+                            pass
+
+                def is_ignored(check_path):
+                    rel_p = os.path.relpath(check_path, base_dir)
+                    parts = rel_p.split(os.sep)
+                    for pattern in ignore_patterns:
+                        if any(fnmatch.fnmatch(part, pattern) for part in parts) or fnmatch.fnmatch(rel_p, pattern):
+                            return True
+                    return False
                 
                 for root, dirs, files in os.walk(full_path):
-                    dirs[:] = [d for d in dirs if d not in ignore_dirs]
+                    # Prune ignored subdirectories in-place so os.walk doesn't step into them
+                    dirs[:] = [d for d in dirs if not is_ignored(os.path.join(root, d))]
+                    
                     for file in files:
-                        if file == '.env': continue
                         fpath = os.path.join(root, file)
+                        if is_ignored(fpath):
+                            continue
+                            
                         ext = os.path.splitext(fpath)[1].lower()
                         rel_p = os.path.relpath(fpath, base_dir).replace("\\", "/")
                         

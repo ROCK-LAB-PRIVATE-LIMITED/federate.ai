@@ -148,9 +148,9 @@ def save_session_name_map(m: dict):
 class ToolConfirmationModal(ModalScreen[bool]):
     DEFAULT_CSS = """
     ToolConfirmationModal { align: center middle; background: $background 60%; }
-    #confirm_dialog { width: 70; max-height: 80%; border: thick $warning; background: $surface; padding: 1 2; }
-    #args_scroll { margin: 1 0; height: auto; max-height: 15; border: round $primary; background: $boost; padding: 1 2; }
-    .buttons { height: auto; align: right middle; margin-top: 1; }
+    #confirm_dialog { width: 70; height: 75%; border: thick $warning; background: $surface; padding: 1 2; }
+    #args_scroll { margin: 1 0; height: 1fr; border: round $primary; background: $boost; padding: 1 2; }
+    .buttons { height: auto; align: right middle; margin-top: 0; }
     .buttons Button { margin-left: 1; }
     """
     def __init__(self, tool_name: str, arguments: dict, agent_name: str = "Agent"):
@@ -169,7 +169,7 @@ class ToolConfirmationModal(ModalScreen[bool]):
                     formatted_args = json.dumps(self.arguments, indent=4)
                 except Exception:
                     formatted_args = str(self.arguments)
-                yield Static(formatted_args)
+                yield Static(formatted_args, markup=False)
                 
             with Horizontal(classes="buttons"):
                 yield Button("Approve (Execute)", id="approve", variant="success")
@@ -455,6 +455,12 @@ class GlobalSettingsModal(ModalScreen[str]):
                     yield Label("PDF Rendering DPI", classes="field_label")
                     yield Label("DPI resolution used when converting PDF document pages to images for vision parsing.", classes="field_help")
                     yield Input(id="pdf_dpi", placeholder="e.g. 150")
+
+                yield Label("Context Compression", classes="section_label")
+                with Vertical(classes="field_container"):
+                    yield Label("Verbatim Messages to Keep", classes="field_label")
+                    yield Label("Number of recent dialogue messages kept verbatim at the end of the context (Minimum: 1).", classes="field_help")
+                    yield Input(id="keep_verbatim_count", placeholder="e.g. 2")
                     
             with Horizontal(id="global_actions"):
                 yield Button("Save Changes", id="save_global_btn", variant="success")
@@ -476,6 +482,7 @@ class GlobalSettingsModal(ModalScreen[str]):
         self.query_one("#research_min_length", Input).value = str(config.get("research_min_length", 5000))
         self.query_one("#max_shrink_attempts", Input).value = str(config.get("max_shrink_attempts", 15))
         self.query_one("#pdf_dpi", Input).value = str(config.get("pdf_dpi", 150))
+        self.query_one("#keep_verbatim_count", Input).value = str(config.get("keep_verbatim_count", 1))
 
     @on(Button.Pressed, "#save_global_btn")
     def save_btn(self):
@@ -518,6 +525,14 @@ class GlobalSettingsModal(ModalScreen[str]):
         
         try: pdf_dpi_val = int(self.query_one("#pdf_dpi", Input).value.strip())
         except ValueError: pdf_dpi_val = 150
+
+        try: keep_verbatim = int(self.query_one("#keep_verbatim_count", Input).value.strip())
+        except ValueError: keep_verbatim = 1
+
+        # Enforce that at least 1 message is kept verbatim
+        if keep_verbatim < 1:
+            self.notify("Invalid: Verbatim Messages to Keep must be at least 1.", severity="error")
+            return
             
         config = {
             "search_pacing_delay": pacing,
@@ -532,7 +547,8 @@ class GlobalSettingsModal(ModalScreen[str]):
             "research_context_tokens": tokens,
             "research_min_length": min_len,
             "max_shrink_attempts": max_shrink,
-            "pdf_dpi": pdf_dpi_val
+            "pdf_dpi": pdf_dpi_val,
+            "keep_verbatim_count": keep_verbatim
         }
         save_global_settings(config)
         
@@ -2084,12 +2100,17 @@ class AIAgentView(Vertical):
             final_result[0] = bool(res)
             result_event.set()
 
-        self.app.call_from_thread(self.app.push_screen, ToolConfirmationModal(tool_name, arguments, agent_name=agent_name), handle_result)
+        # Thread-safe instantiation and push of the ModalScreen on the main event loop thread
+        def push_modal():
+            modal = ToolConfirmationModal(tool_name, arguments, agent_name=agent_name)
+            self.app.push_screen(modal, handle_result)
+
+        self.app.call_from_thread(push_modal)
         
         while not result_event.is_set():
             if toolbox.ABORT_EVENT.is_set():
                 return False
-            time.sleep(0.1)
+            result_event.wait(0.1) # Efficient wake-up with timeout (releases GIL)
             
         return final_result[0]
     
@@ -2097,6 +2118,8 @@ class AIAgentView(Vertical):
         if self._running_agents:
             self.action_abort() 
         self.session_manager.clear_all_contexts()
+        self.agent_executors = {} # Clear cached executors so updated schemas load fresh
+        self.agent_mode = "PLAN"
         self.clear_chat_ui()
         invalidate_stats_cache() # Evicts old stats cache prior to rebuild
         self._write_log(Rule(title="[bold yellow]ALL CONTEXTS CLEARED", style="dim"))
@@ -2580,7 +2603,7 @@ class AIAgentView(Vertical):
 
             def make_wrapped_tool(t_obj):
                 def wrapped_func(*args, **kwargs):
-                    agent_name = getattr(toolbox.thread_context, "agent_name", "Agent")
+                    agent_name = self.active_agent.name # Directly read the active agent name to bypass thread-local limits
                     confirmed = self.confirm_tool_execution(t_obj.name, kwargs, agent_name=agent_name)
                     if not confirmed:
                         return f"Error: Tool execution of '{t_obj.name}' was rejected by the user."
