@@ -105,7 +105,7 @@ def _get_search_delay() -> float:
         else:
             sleep_needed = 0.0
             
-        _LAST_SEARCH_TIME = min(now + sleep_needed, now + pacing_target * 4.5)
+        _LAST_SEARCH_TIME = now + sleep_needed # No cap any more
         # Persist to disk so it survives app crashes and restarts
         _save_last_search_time(_LAST_SEARCH_TIME)
     return sleep_needed
@@ -358,7 +358,7 @@ def resilient_invoke(model, messages):
                 
                 # Cap the virtual queue to prevent compounding sleeps from growing infinitely.
                 # Accommodates up to 4 parallel sub-agents staggered perfectly.
-                _LAST_LLM_CALL_TIME = min(now + sleep_needed, now + pacing_target * 4.5)
+                _LAST_LLM_CALL_TIME = now + sleep_needed # Now completely uncapped supports as many as needed
                 
             if sleep_needed > 0:
                 # Sleep outside the lock in small increments to stay responsive to Ctrl+A (Abort)
@@ -631,10 +631,17 @@ def load_dynamic_tools(agent_name: str) -> List[StructuredTool]:
 
 @tool
 def read_file(filepath: str) -> str:
-    """Reads a file and returns its content with line numbers added to every line."""
+    """Reads a file and returns its content. Natively supports plain text, PDFs, PNGs, JPGs, and other images."""
     try:
         safe_path, display_path = get_safe_path(filepath)
-        log_tool(f"Reading file:[/cyan] {display_path}")
+        ext = os.path.splitext(safe_path)[1].lower()
+        
+        # Check for binary image/PDF formats
+        if ext in {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf'}:
+            log_tool(f"Visualizing file: [cyan]{display_path}[/cyan]")
+            return f"[Attached Image: {safe_path}]"
+            
+        log_tool(f"Reading file: [cyan]{display_path}[/cyan]")
         with open(safe_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
         # FIX: rstrip('\n') removes the newline character correctly
@@ -651,7 +658,7 @@ def save_file(filepath: str, content: str) -> str:
         # FIX: Create parent directories if they don't exist
         os.makedirs(os.path.dirname(safe_path), exist_ok=True)
         
-        log_tool(f"Saving file:[/cyan] {display_path}")
+        log_tool(f"Saving file:[cyan] {display_path}[/cyan]")
         with open(safe_path, 'w', encoding='utf-8') as f:
             f.write(content)
         return f"Successfully saved {display_path}"
@@ -663,7 +670,7 @@ def edit_file(filepath: str, start_line: int, end_line: int, new_content: str) -
     """Replaces lines from start_line to end_line (inclusive, 1-indexed) in the given file with new_content."""
     try:
         safe_path, display_path = get_safe_path(filepath)
-        log_tool(f"Editing file:[/cyan] {display_path} (lines {start_line}-{end_line})")
+        log_tool(f"Editing file:[cyan] {display_path} (lines {start_line}-{end_line})[/cyan]")
         with open(safe_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
         
@@ -690,7 +697,7 @@ def list_files(directory: str = None) -> str:
         
         # UI Log shows the relative target (e.g. '.' or 'folder_name')
         log_dir_name = display_dir if display_dir != "." else "Project Root"
-        log_tool(f"Listing files in:[/cyan] {log_dir_name}")
+        log_tool(f"Listing files in:[cyan] {log_dir_name}[/cyan]")
         
         ignore_patterns =['.git', '__pycache__', 'node_modules', 'venv', '.venv', '.idea', '.vscode']
         
@@ -916,7 +923,7 @@ def curl_url(url: str) -> str:
         from markdownify import markdownify as md
         
         check_abort()
-        log_tool(f"Fetching URL:[/cyan] {url}")
+        log_tool(f"Fetching URL:[cyan] {url}[/cyan]")
         
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
@@ -953,7 +960,7 @@ def search_web(query: str) -> str:
             for _ in range(int(sleep_time * 10)):
                 check_abort()
                 time.sleep(0.1)
-        log_tool(f"Searching for:[/cyan] '{query}'...")
+        log_tool(f"Searching for:[cyan] '{query}'[/cyan]...")
     except Exception as e:
         return f"Search failed: {str(e)}"
 

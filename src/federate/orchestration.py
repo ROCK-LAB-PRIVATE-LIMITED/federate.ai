@@ -27,7 +27,7 @@ OPERATIONAL RULES:
 2. You are a Specialist Agent. Operate autonomously to fulfill the user's instructions.
 3. Break the user's request into steps. Do not start a task until you have a plan.
 4. Use tools. If a tool output is insufficient, DO NOT call the same tool with the same arguments immediately. Try another tool or argument.
-5. Once you have the info, synthesize it. Do not keep searching if you have enough info.
+5. Once you have the info, synthesize it.  Web searches must be followed up by one or more curl_url tool calls to be effective. If the results are judged to be irrelavant, search again with a different query likely to return more relavant results. Do not keep searching if you have enough info.
 6. SEARCH AND RESEARCH: Whenever you get stuck, perform web searches and fetch web pages to get up to date information.
 
 AGENT INTERCOM RULES:
@@ -35,7 +35,7 @@ AGENT INTERCOM RULES:
 - You will see messages wrapped in <AGENT_INTERCOM> tags; these are responses from your colleagues. Use them to maintain continuity.
 - Delegation: If a task is more suitable for another agent based on their backstory, summon them.
 - You can summon more than one agent, if you use @AgentA and @AgentB in the same response, first AgentA will be invoked followed immediately by AgentB.
-- Do NOT use raw <AGENT_INTERCOM> tags directly. It won't work and you will look like a fool.
+- Do NOT use raw <AGENT_INTERCOM> tags directly. It won't work and you will look like a fool. If you use it the UI will clearly show the user that you pretended to be someone else. If the user invokes a non-existent agent tell them so instead of pretending to be this non-existent agent.
 
 --- TEAM COMPOSITION ---
 {team_info}
@@ -97,11 +97,10 @@ class AgentConfig:
         team_info = ""
         if all_agents:
             for agent in all_agents:
-                if agent.name == self.name:
-                    team_info += f"- {agent.name} (YOU): {agent.backstory}\n"
-                else:
+                if agent.name != self.name:
                     team_info += f"- {agent.name}: {agent.backstory}\n"
-        else:
+                    
+        if not team_info.strip():
             team_info = "No other agents currently registered."
 
         # Load Layer 1: Core Memory & Quagmires
@@ -193,7 +192,7 @@ class AgentConfig:
             prompt += "\n  7. ACTIVATION: New tools appear after a session reset (Mode Toggle or Clear Context)."
         
         prompt += "\n\nMEMORY MANAGEMENT RULES:"
-        prompt += "\n- Use `update_core_memory` to permanently remember facts. You MUST route data correctly: If it's about the User, set section='USER'. If it's general facts/environment, set section='MEMORY'."
+        prompt += "\n- BE PROACTIVE WITH MEMORY: You must autonomously use `update_core_memory` the exact moment you learn a new preference, project detail, architectural decision, or established fact. Do not wait for the user to ask you to remember it! Route data correctly: section='USER' for user traits/preferences, section='MEMORY' for everything else."
         prompt += "\n- Use `search_episodic_memory` to find concepts and session IDs from the past."
         prompt += "\n- Use `retrieve_episodic_memory` to retrieve the full context of a session after searching memory, if necessary."
         prompt += "\n- Use `read_skill` to read the steps for a skill listed in your library."

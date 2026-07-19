@@ -2470,7 +2470,7 @@ class AIAgentView(Vertical):
                     # Guardrail: Do not extract images if viewing source code, file structures, 
                     # or raw search results to prevent matching dummy tags or literal string variables.
                     tool_name = getattr(msg, "name", None)
-                    if tool_name in {"read_file", "edit_file", "save_file", "list_files", "search_web", "perform_research", "manage_agenda"}:
+                    if tool_name in {"edit_file", "save_file", "list_files", "search_web", "perform_research", "manage_agenda"}:
                         continue
                     
                     # Case A: Local file paths - Support multiple images
@@ -2603,7 +2603,7 @@ class AIAgentView(Vertical):
 
             def make_wrapped_tool(t_obj):
                 def wrapped_func(*args, **kwargs):
-                    agent_name = self.active_agent.name # Directly read the active agent name to bypass thread-local limits
+                    agent_name = agent_config.name # Directly read the active agent name to bypass thread-local limits
                     confirmed = self.confirm_tool_execution(t_obj.name, kwargs, agent_name=agent_name)
                     if not confirmed:
                         return f"Error: Tool execution of '{t_obj.name}' was rejected by the user."
@@ -2830,29 +2830,38 @@ class AIAgentView(Vertical):
                                 mime = mimetypes.guess_type(file_path)[0] or "image/jpeg"
                                 if file_path.lower().endswith(".pdf"):
                                     try:
-                                        from pdf2image import convert_from_path
+                                        import pypdfium2 as pdfium
                                         import io
-                                        # Convert PDF pages to PIL images using the dynamically configured DPI
-                                        # Load persisted DPI if not yet set in memory
-                                        dpi_val = getattr(self, "pdf_dpi", None)
-                                        if dpi_val is None:
-                                            try:
-                                                from commands import load_pdf_dpi
-                                                dpi_val = load_pdf_dpi()
-                                            except Exception:
-                                                dpi_val = 150
-                                            self.pdf_dpi = dpi_val
+                                        
+                                        doc = pdfium.PdfDocument(file_path)
+                                        dpi_val = getattr(self, "pdf_dpi", None) or 150
+                                        # Convert DPI to scale value relative to 72 points per inch standard
+                                        scale_val = dpi_val / 72.0
+                                        
+                                        for page in doc:
+                                            bitmap = page.render(scale=scale_val)
+                                            pil_img = bitmap.to_pil()
                                             
-                                        images = convert_from_path(file_path, dpi=dpi_val)
-                                        for img in images:
                                             buffered = io.BytesIO()
-                                            img.save(buffered, format="PNG")
+                                            pil_img.save(buffered, format="PNG")
                                             b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
                                             content_list.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
-                                    except ImportError:
-                                        content_list.append({"type": "text", "text": "[PDF conversion failed: 'pdf2image' not installed. In Termux run: pkg install poppler && pip install pdf2image]"})
                                     except Exception as pdf_e:
-                                        content_list.append({"type": "text", "text": f"[PDF processing error: {pdf_e}. Make sure 'poppler' is installed in Termux.]"})
+                                        # --- SEAMLESS FALLBACK: Try pure-python text extraction via pypdf ---
+                                        try:
+                                            from pypdf import PdfReader
+                                            reader = PdfReader(file_path)
+                                            text_accum = []
+                                            for idx_p, page in enumerate(reader.pages):
+                                                page_text = page.extract_text() or ""
+                                                text_accum.append(f"--- PDF Page {idx_p+1} ---\n{page_text}")
+                                            full_text = "\n\n".join(text_accum).strip()
+                                            if full_text:
+                                                content_list.append({"type": "text", "text": f"[Visual conversion failed, fell back to text extraction]:\n\n{full_text}"})
+                                            else:
+                                                raise ValueError("No text extractable from this PDF.")
+                                        except Exception as fallback_e:
+                                            content_list.append({"type": "text", "text": f"[PDF processing failed: Visual engine error: {pdf_e}. Text engine error: {fallback_e}. Make sure the PDF is not corrupted.]"})
                                 else:
                                     with open(file_path, "rb") as f:
                                         b64 = base64.b64encode(f.read()).decode('utf-8')

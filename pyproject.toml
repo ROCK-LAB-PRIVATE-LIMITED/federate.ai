@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "federate"
-version = "0.9.43"
+version = "1.0.0"
 description = "A cross-platform terminal based p2p agent orchestration harness and universal automation system"
 readme = "README.md"
 license = {text = "Apache Software License"}
@@ -14,16 +14,16 @@ authors = [
 ]
 keywords = ["ai", "agent", "tui", "coding", "llm"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
-    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Topic :: Software Development :: Libraries",
+    "Topic :: Scientific/Engineering:: Artificial Intelligence",
 ]
 
 dependencies = [
@@ -50,6 +50,7 @@ dependencies = [
     "pylatexenc==2.10",  # Compulsory LaTeX parser for mathematical unicode rendering
     "pyperclip==1.11.0",   # Compulsory clipboard support for IDE copies/cuts
     "curl-cffi==0.15.0",   # Compulsory HTTP client with impersonation support (Cloudflare bypass)
+    "pypdfium2"
     # Platform-specific hard dependencies
     "pywinpty; platform_system == 'Windows'",
 ]
@@ -69,6 +70,7 @@ vision = [
 # PDF report generation for Deep Research (optional)
 pdf = [
     "weasyprint",
+    "pypdf"
 ]
 # Telegram bot integration
 telegram = []
