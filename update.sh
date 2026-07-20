@@ -172,7 +172,7 @@ EOF
     export ANDROID_API_LEVEL=19
 
     echo "[*] Upgrading Federate on Python 3.13..."
-    uv tool install --upgrade --python 3.13 \
+    uv tool install --upgrade --refresh --python 3.13 \
         --find-links "$TYRES_DIR" \
         --find-links "https://geoarkadeep.github.io/Tyres/" \
         --with pycryptodome \
@@ -212,19 +212,54 @@ elif [ "$OS_NAME" = "Linux" ] && [ "$IS_ARM" = true ]; then
 
     if [ "$DOWNLOAD_SUCCESS" = true ]; then
         echo "[*] Upgrading Federate with full extras [all] using pre-compiled wheels on Python 3.13..."
-        uv tool install --upgrade --python 3.13 --find-links "$TYRES_DIR" "federate[all]"
+        uv tool install --upgrade --refresh --python 3.13 --find-links "$TYRES_DIR" "federate[all]"
     else
         echo "[!] Pre-compiled wheels not found."
         echo "[!] Falling back to basic upgrade to prevent compilation hangs."
-        uv tool install --upgrade --python 3.13 federate
+        uv tool install --upgrade --refresh --python 3.13 federate
     fi
     rm -rf "$TYRES_DIR"
 
 else
     # macOS, WSL, or standard Linux (x86_64) - Standardized on Python 3.13
     echo "[*] Desktop/Server environment detected."
+    if [ "$OS_NAME" = "Darwin" ]; then
+        echo "[*] macOS environment detected. Checking for Homebrew..."
+        if ! command -v brew &> /dev/null; then
+            echo "[*] Homebrew not found. Attempting to install Homebrew..."
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/null || true
+            if [ -f /opt/homebrew/bin/brew ]; then
+                eval "$(/opt/homebrew/bin/brew shellenv)"
+            elif [ -f /usr/local/bin/brew ]; then
+                eval "$(/usr/local/bin/brew shellenv)"
+            fi
+        fi
+        
+        if command -v brew &> /dev/null; then
+            echo "[*] Installing/Upgrading Pango, Cairo, Glib, and Gobject-Introspection via Homebrew..."
+            brew install pango cairo glib gobject-introspection
+            
+            BREW_LIB_DIR="$(brew --prefix)/lib"
+            export DYLD_FALLBACK_LIBRARY_PATH="$BREW_LIB_DIR:$DYLD_FALLBACK_LIBRARY_PATH"
+            
+            for profile in "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc"; do
+                if [ -f "$profile" ] || [ "${profile##*/}" = ".zshrc" -a "$SHELL" = "/bin/zsh" ] || [ "${profile##*/}" = ".bash_profile" -a "$SHELL" = "/bin/bash" ]; then
+                    touch "$profile"
+                    if ! grep -q "DYLD_FALLBACK_LIBRARY_PATH" "$profile"; then
+                        echo "" >> "$profile"
+                        echo "# Federate.AI WeasyPrint library path" >> "$profile"
+                        echo "export DYLD_FALLBACK_LIBRARY_PATH=\"$BREW_LIB_DIR:\$DYLD_FALLBACK_LIBRARY_PATH\"" >> "$profile"
+                        echo "[*] Configured DYLD_FALLBACK_LIBRARY_PATH in $profile"
+                    fi
+                fi
+            done
+        else
+            echo "[!] Homebrew could not be verified. Please install Homebrew manually and run:"
+            echo "    brew install pango cairo glib gobject-introspection"
+        fi
+    fi
     echo "[*] Upgrading Federate on Python 3.13..."
-    uv tool install --upgrade --python 3.13 "federate[all]"
+    uv tool install --upgrade --refresh --python 3.13 "federate[all]"
 fi
 
 echo "======================================================================"

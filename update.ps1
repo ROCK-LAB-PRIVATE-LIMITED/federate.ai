@@ -97,7 +97,7 @@ if ($upToDate -and -not $Force) {
 }
 
 Write-Host "[*] Upgrading Federate on standardized Python 3.13..." -ForegroundColor Yellow
-uv tool install --upgrade --python 3.13 "federate[audio,vision]"
+uv tool install --upgrade --refresh --python 3.13 "federate[audio,ide,vision]"
 
 Write-Host "======================================================================" -ForegroundColor Green
 Write-Host " 🎉 Federate has been successfully updated!" -ForegroundColor Green
