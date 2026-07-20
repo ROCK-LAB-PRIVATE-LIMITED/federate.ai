@@ -41,12 +41,30 @@ Even on mobile, you can delegate complex multi-step coding tasks to an autonomou
 
 ## Installation
 
-Install the package via `pip`. We recommend installing with all optional extras to enable local voice/audio and serving capabilities:
+Mac/Linux/Android(Termux):
+```bash
+curl https://raw.githubusercontent.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/main/install.sh | bash
+```
 
+Windows:
+```powershell
+irm https://raw.githubusercontent.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/main/install.ps1 | iex
+```
+
+Via `uv`:
+```bash
+uv tool install federate
+```
+Via `pipx`:
+```bash
+pipx install federate
+```
+
+You can also install the package via `pip`. We recommend installing with all optional extras to enable local voice/audio and IDE capabilities:
 ```bash
 pip install "federate[all]"
 ```
-*(For a lightweight installation without audio or computer usage capabilities, run `pip install federate` instead on Termux and Raspberry Pi).*
+*(For a lightweight installation without audio or computer usage capabilities, run `pip install federate`).*
 
 ---
 
