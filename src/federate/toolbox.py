@@ -112,8 +112,8 @@ def _get_search_delay() -> float:
     
 from markdown import markdown
 from fake_useragent import UserAgent
-#from ddgs import DDGS
-#from PIL import Image
+from ddgs import DDGS
+from PIL import Image
 
 from langchain_core.tools import tool, StructuredTool
 from pydantic import BaseModel, Field, create_model
