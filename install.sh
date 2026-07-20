@@ -131,7 +131,7 @@ install_federate_unix() {
 
         # Ensure weasyprint system dependencies are present even if uv was already installed
         echo "[*] Ensuring required system packages are installed..."
-        pkg install -y pango gobject-introspection libffi pkg-config tree-sitter-python tree-sitter-go tree-sitter-rust tree-sitter-c tree-sitter-bash
+        pkg install -y pango gobject-introspection libffi pkg-config tree-sitter-python tree-sitter-go tree-sitter-rust tree-sitter-c tree-sitter-bash libjpeg-turbo libtiff libpng
 
         # 1. Define a safe working directory in Termux home space for dummy builds
         BUILD_DIR="$HOME/.tmp_sqlite_vec_build"
