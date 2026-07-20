@@ -261,8 +261,47 @@ EOF
                 echo "    brew install pango cairo glib gobject-introspection"
             fi
         fi
+
+        echo "[*] Querying PyPI for the latest version..."
+        LATEST_VER=$(python3 -c "
+import urllib.request, json, time, random
+def get_pypi_version():
+    try:
+        url = f'https://pypi.org/pypi/federate/json?cb={random.randint(1, 1000000)}'
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            return data['info']['version']
+    except Exception:
+        return None
+v1 = get_pypi_version()
+time.sleep(0.5)
+v2 = get_pypi_version()
+if v1 and v2:
+    try:
+        p1 = tuple(map(int, [x for x in v1.split('.') if x.isdigit()]))
+        p2 = tuple(map(int, [x for x in v2.split('.') if x.isdigit()]))
+        print(v2 if p2 >= p1 else v1)
+    except Exception:
+        print(v2)
+elif v2:
+    print(v2)
+elif v1:
+    print(v1)
+else:
+    print('')
+" 2>/dev/null || echo "")
+
         echo "[*] Installing Federate with all features on standardized Python 3.13 environment..."
-        uv tool install --refresh --python 3.13 "federate[all]"
+        if [ -n "$LATEST_VER" ]; then
+            echo "[*] Target version resolved: v$LATEST_VER"
+            if ! uv tool install --refresh --python 3.13 "federate[all]==$LATEST_VER"; then
+                echo "[!] Explicit installation of v$LATEST_VER failed. Falling back to standard resolution..."
+                uv tool install --refresh --python 3.13 "federate[all]"
+            fi
+        else
+            uv tool install --refresh --python 3.13 "federate[all]"
+        fi
     fi
 
     # Clean up cached binaries
