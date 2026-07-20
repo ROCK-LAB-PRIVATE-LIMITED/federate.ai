@@ -6,7 +6,7 @@ It turns your terminal into an interactive workbench where you can run specializ
 
 ---
 <p align="center">
-  <img src="album_art.png" alt="Federate Logo" width="100%" />
+  <img src="https://raw.githubusercontent.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/main/album_art.png" alt="Federate Logo" width="100%" />
 </p>
 
 ## What Makes Federate Different?
@@ -65,6 +65,34 @@ You can also install the package via `pip`. We recommend installing with all opt
 pip install "federate[all]"
 ```
 *(For a lightweight installation without audio or computer usage capabilities, run `pip install federate`).*
+
+---
+
+## Update
+
+Mac/Linux/Android(Termux):
+```bash
+curl https://raw.githubusercontent.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/main/update.sh | bash
+```
+
+Windows:
+```powershell
+irm https://raw.githubusercontent.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/main/update.ps1 | iex
+```
+
+---
+
+## Update
+
+Mac/Linux/Android(Termux):
+```bash
+curl https://raw.githubusercontent.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/main/update.sh | bash
+```
+
+Windows:
+```powershell
+irm https://raw.githubusercontent.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/main/update.ps1 | iex
+```
 
 ---
 
