@@ -79,7 +79,11 @@ telegram = []
 # Browser-based UI serving
 ide = [
     "tree-sitter",
-    "tree-sitter-languages",
+    "tree-sitter-python",
+    "tree-sitter-c",
+    "tree-sitter-rust",
+    "tree-sitter-go",
+    "tree-sitter-cpp"
 ]
 # All optional extras
 all = [
