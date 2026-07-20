@@ -82,16 +82,16 @@ irm https://raw.githubusercontent.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/main/
 
 ---
 
-## Update
+## Uninstall
 
 Mac/Linux/Android(Termux):
 ```bash
-curl https://raw.githubusercontent.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/main/update.sh | bash
+curl https://raw.githubusercontent.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/main/uninstall.sh | bash
 ```
 
 Windows:
 ```powershell
-irm https://raw.githubusercontent.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/main/update.ps1 | iex
+irm https://raw.githubusercontent.com/ROCK-LAB-PRIVATE-LIMITED/federate.ai/main/uninstall.ps1 | iex
 ```
 
 ---
