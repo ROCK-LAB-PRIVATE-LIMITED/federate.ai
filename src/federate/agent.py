@@ -364,6 +364,42 @@ class KeyringUnlockModal(ModalScreen[tuple]):
     def cancel(self):
         self.dismiss(None)
 
+class CopyrightWarningModal(ModalScreen[bool]):
+    DEFAULT_CSS = """
+    CopyrightWarningModal { align: center middle; background: $background 60%; }
+    #warning_dialog { width: 70; height: auto; border: thick $error; background: $surface; padding: 1 2; }
+    .warning_content { margin: 1 0; text-style: bold; text-wrap: wrap; height: auto; width: 100%; color: $error; }
+    .buttons { height: auto; align: right middle; margin-top: 1; }
+    .buttons Button { margin-left: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="warning_dialog"):
+            yield Label("⚠ Copyright Warning", classes="pane_title")
+            yield Label(
+                "You are attempting to include potentially copyrighted images in the research output. "
+                "You are solely responsible for any and all copyright violations that may result if you share the document publicly or use the document commercially. "
+                "This feature is meant for personal usage only. Rock Lab Private Limited accepts no legal liability and you use this at your sole risk. "
+                "All legal issues arising from using this feature are between the user and the (potential) copyright holders. "
+                "By choosing to use this feature, you proceed at your own risk, legal or otherwise.",
+                classes="warning_content"
+            )
+            with Horizontal(classes="buttons"):
+                yield Button("I Accept & Proceed", id="btn_accept", variant="error")
+                yield Button("Cancel", id="btn_cancel", variant="success")
+
+    def on_mount(self):
+        self.query_one("#btn_cancel").focus()
+
+    @on(Button.Pressed, "#btn_accept")
+    def on_accept(self):
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#btn_cancel")
+    def on_cancel(self):
+        self.dismiss(False)
+
+
 class GlobalSettingsModal(ModalScreen[str]):
     DEFAULT_CSS = """
     GlobalSettingsModal { align: center middle; background: $background 60%; }
@@ -456,6 +492,24 @@ class GlobalSettingsModal(ModalScreen[str]):
                     yield Label("DPI resolution used when converting PDF document pages to images for vision parsing.", classes="field_help")
                     yield Input(id="pdf_dpi", placeholder="e.g. 150")
 
+                yield Label("Deep Research Image Companion (Vision Subsystem)", classes="section_label")
+                
+                with Vertical(classes="field_container"):
+                    yield Checkbox("Enable Deep Research Image Companion", id="research_image_system_enabled")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Maximum Images to Gather", classes="field_label")
+                    yield Label("Limit the maximum number of images requested and verified for the consolidated report.", classes="field_help")
+                    yield Input(id="research_images_max", placeholder="e.g. 10")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Image Search Retries Per Turn", classes="field_label")
+                    yield Label("Number of candidate image downloads and verification checks attempted per turn.", classes="field_help")
+                    yield Input(id="research_image_retries", placeholder="e.g. 1")
+                    
+                with Vertical(classes="field_container"):
+                    yield Checkbox("Embed images directly (instead of links)", id="research_images_as_links")
+
                 yield Label("Context Compression", classes="section_label")
                 with Vertical(classes="field_container"):
                     yield Label("Verbatim Messages to Keep", classes="field_label")
@@ -483,6 +537,33 @@ class GlobalSettingsModal(ModalScreen[str]):
         self.query_one("#max_shrink_attempts", Input).value = str(config.get("max_shrink_attempts", 15))
         self.query_one("#pdf_dpi", Input).value = str(config.get("pdf_dpi", 150))
         self.query_one("#keep_verbatim_count", Input).value = str(config.get("keep_verbatim_count", 1))
+        
+        self.query_one("#research_images_max", Input).value = str(config.get("research_images_max", 10))
+        self.query_one("#research_image_retries", Input).value = str(config.get("research_image_retries", 1))
+        with self.prevent(Checkbox.Changed):
+            self.query_one("#research_image_system_enabled", Checkbox).value = config.get("research_image_system_enabled", False)
+            self.query_one("#research_images_as_links", Checkbox).value = not config.get("research_images_as_links", False)
+
+    @on(Checkbox.Changed, "#research_images_as_links")
+    def on_as_links_changed(self, event: Checkbox.Changed):
+        if event.value:  # If checked (meaning Embed images directly is enabled)
+            self.check_and_trigger_warning("research_images_as_links")
+
+    @on(Checkbox.Changed, "#research_image_system_enabled")
+    def on_system_enabled_changed(self, event: Checkbox.Changed):
+        if event.value:  # If checked (meaning Image subsystem master switch is enabled)
+            self.check_and_trigger_warning("research_image_system_enabled")
+
+    def check_and_trigger_warning(self, changed_checkbox_id: str):
+        system_enabled = self.query_one("#research_image_system_enabled", Checkbox).value
+        embed_enabled = self.query_one("#research_images_as_links", Checkbox).value
+        
+        if system_enabled and embed_enabled:
+            def handle_warning(accepted: bool):
+                if not accepted:
+                    with self.prevent(Checkbox.Changed):
+                        self.query_one(f"#{changed_checkbox_id}", Checkbox).value = False
+            self.app.push_screen(CopyrightWarningModal(), handle_warning)
 
     @on(Button.Pressed, "#save_global_btn")
     def save_btn(self):
@@ -534,6 +615,15 @@ class GlobalSettingsModal(ModalScreen[str]):
             self.notify("Invalid: Verbatim Messages to Keep must be at least 1.", severity="error")
             return
             
+        try: img_max = int(self.query_one("#research_images_max", Input).value.strip())
+        except ValueError: img_max = 10
+        
+        try: img_retries = int(self.query_one("#research_image_retries", Input).value.strip())
+        except ValueError: img_retries = 1
+        
+        img_system_enabled = self.query_one("#research_image_system_enabled", Checkbox).value
+        images_as_links = not self.query_one("#research_images_as_links", Checkbox).value
+
         config = {
             "search_pacing_delay": pacing,
             "max_search_results": max_results,
@@ -548,7 +638,11 @@ class GlobalSettingsModal(ModalScreen[str]):
             "research_min_length": min_len,
             "max_shrink_attempts": max_shrink,
             "pdf_dpi": pdf_dpi_val,
-            "keep_verbatim_count": keep_verbatim
+            "keep_verbatim_count": keep_verbatim,
+            "research_image_system_enabled": img_system_enabled,
+            "research_images_max": img_max,
+            "research_image_retries": img_retries,
+            "research_images_as_links": images_as_links
         }
         save_global_settings(config)
         

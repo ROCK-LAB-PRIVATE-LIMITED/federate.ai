@@ -42,7 +42,12 @@ DEFAULT_GLOBAL_SETTINGS = {
     "max_shrink_attempts": 15,
     "pdf_dpi": 150,
     "keep_verbatim_count": 2,
+    "research_image_system_enabled": False,
+    "research_images_max": 10,
+    "research_image_retries": 1,
+    "research_images_as_links": False,
 }
+
 
 def load_global_settings() -> dict:
     settings = DEFAULT_GLOBAL_SETTINGS.copy()
@@ -112,8 +117,8 @@ def _get_search_delay() -> float:
     
 from markdown import markdown
 from fake_useragent import UserAgent
-#from ddgs import DDGS
-#from PIL import Image
+from ddgs import DDGS
+from PIL import Image
 
 from langchain_core.tools import tool, StructuredTool
 from pydantic import BaseModel, Field, create_model
@@ -1081,7 +1086,10 @@ def render_markdown_to_pdf(md_path: str, pdf_path: str):
         return
     try:
         with open(md_path, "r", encoding="utf-8") as f:
-            md_text = f.read().replace('![', '[')
+            md_text = f.read()
+        global_settings = load_global_settings()
+        if global_settings.get("research_images_as_links", False):
+            md_text = md_text.replace('![', '[')
 
         html_text = markdown(md_text, extensions=["fenced_code", "tables", "toc", "codehilite", "extra"])
         
@@ -1545,71 +1553,61 @@ def run_subagent(search_prompt, task_name, output_dir=".", config=None, batch_id
 class VisionImageAgent:
     def __init__(self, api_key, base_url, model_name):
         self.llm = ChatOpenAI(model=model_name, api_key=api_key, base_url=base_url, temperature=0.1, max_retries=5, timeout=120)
+        try:
+            self.ddgs = DDGS()
+        except Exception as e:
+            safe_print(f" [!] Warning: Initial image search session instantiation failed: {e}")
+            self.ddgs = None
 
     def find_and_verify_single_image(self, query, master_context):
-        try:
-            from PIL import Image
-        except ImportError:
-            log_tool("[bold red]❌ Vision Error: Pillow (PIL) is not installed. Skipping image verification.[/bold red]")
+        global_settings = load_global_settings()
+        max_retries = int(global_settings.get("research_image_retries", 1))
+        results = []
+        
+        for attempt in range(1, max_retries + 1):
+            if not self.ddgs:
+                try:
+                    self.ddgs = DDGS()
+                except Exception:
+                    pass
+
+            try:
+                if self.ddgs:
+                    results = list(self.ddgs.images(query, max_results=8))
+                else:
+                    results = []
+
+                if results:
+                    break
+                else:
+                    safe_print(f" [!] Image search attempt {attempt}/{max_retries} returned no results.")
+            except Exception as e:
+                safe_print(f" [!] Image search attempt {attempt}/{max_retries} failed: {e}")
+            
+            if attempt < max_retries:
+                try:
+                    self.ddgs = DDGS()
+                except Exception as init_err:
+                    safe_print(f" [!] Session regeneration failed: {init_err}")
+                    self.ddgs = None
+                
+                sleep_time = (attempt * 2.0) + random.uniform(0.1, 0.9)
+                time.sleep(sleep_time)
+
+        if not results:
             return None
 
-        results = []
-        is_android = sys.platform == "android" or hasattr(sys, "getandroidapilevel")
-
-        # 1. Attempt standard DDGS only if NOT running on Python 3.13+ Android
-        if not is_android:
-            try:
-                from ddgs import DDGS
-                with DDGS() as ddgs:
-                    results = [{"image": r.get("image")} for r in ddgs.images(query, max_results=8)]
-            except Exception as e:
-                log_tool(f"[bold yellow]⚠️ Standard DDGS failed or not installed ({e}). Trying fallback scraper...[/bold yellow]")
-                results = []
-        else:
-            log_tool("[bold yellow]🤖 Android environment detected. Bypassing DDGS to avoid JNI panic; utilizing fallback scraper...[/bold yellow]")
-
-        # 2. Fallback Scraper: Executes on Android, or if standard DDGS fails
-        if not results:
-            try:
-                import urllib.parse
-                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-                res = requests.get(f"https://duckduckgo.com/?q={urllib.parse.quote(query)}", headers=headers, timeout=10)
-                res.raise_for_status()
-                
-                vqd_match = re.search(r'vqd\s*=\s*[\'"]?([^\'"&]+)', res.text)
-                if vqd_match:
-                    vqd = vqd_match.group(1)
-                    params = {
-                        "l": "us-en",
-                        "o": "json",
-                        "q": query,
-                        "vqd": vqd,
-                        "f": ",,,",
-                        "p": "1"
-                    }
-                    res_images = requests.get("https://duckduckgo.com/i.js", headers=headers, params=params, timeout=10)
-                    res_images.raise_for_status()
-                    data = res_images.json()
-                    results = [{"image": r.get("image")} for r in data.get("results", [])]
-            except Exception as e:
-                log_tool(f"[bold red]❌ Image fallback scraper error: {e}[/bold red]")
-                return None
-
-        # 3. Process candidate images inside isolated error boundaries
+        # 2. Iterate and download candidates sequentially
         for r in results:
-            url = r.get('image')
-            if not url:
-                continue
+            url = r['image']
             try:
                 resp = requests.get(url, timeout=5)
-                resp.raise_for_status()
+                resp.raise_for_status()  # Fast fail on 403 Forbidden / 406 Not Acceptable
                 img = Image.open(io.BytesIO(resp.content))
-                if img.size[0] < 320 or img.size[1] < 240: 
-                    continue
+                if img.size[0] < 320 or img.size[1] < 240: continue
 
                 b64_resampled = self._resample_for_model(resp.content)
-                if not b64_resampled: 
-                    continue
+                if not b64_resampled: continue
                 
                 check_msg = {
                     "role": "user",
@@ -1738,12 +1736,17 @@ class MasterOrchestrator:
         image_assets = []
         search_history =[]
         
-        if vision_config and vision_config.get("enabled"):
+        global_settings = load_global_settings()
+        vision_pipeline_enabled = global_settings.get("research_image_system_enabled", False)
+        is_android_sys = platform.system() == "Android"
+        
+        if vision_config and vision_config.get("enabled") and vision_pipeline_enabled and not is_android_sys:
             try:
                 vision_agent = VisionImageAgent(vision_config["api_key"], vision_config["base_url"], vision_config["model_name"])
-                for i in range(10):
+                max_images = int(global_settings.get("research_images_max", 10))
+                for i in range(max_images):
                     check_abort()
-                    query_prompt = f"REPORT DATA: {combined_context}\nPREVIOUS: {json.dumps(search_history)}\nTASK: Generate a SINGLE, highly specific technical image search query for the NEXT image. Return ONLY the search query text."
+                    query_prompt = f"REPORT DATA: {combined_context}\nPREVIOUS: {json.dumps(search_history)}\nTASK: Generate a SINGLE image search query for the NEXT image. Keep the query as short and generic as possible while still matching the overall context. Return ONLY the search query text."
                     query = resilient_invoke(self.llm, [SystemMessage(content=query_prompt), HumanMessage(content="Please proceed.")]).content.strip().replace('"', '')
                     safe_print(f" [MASTER] Turn {i+1}: Generating search for '{query}'")
                     

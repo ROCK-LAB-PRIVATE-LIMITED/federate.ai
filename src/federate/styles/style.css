@@ -58,3 +58,10 @@ h1 {
   letter-spacing: 0.08em;
 }
 
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 1.5em auto;
+  border-radius: 4px;
+}
