@@ -112,8 +112,8 @@ def _get_search_delay() -> float:
     
 from markdown import markdown
 from fake_useragent import UserAgent
-from ddgs import DDGS
-from PIL import Image
+#from ddgs import DDGS
+#from PIL import Image
 
 from langchain_core.tools import tool, StructuredTool
 from pydantic import BaseModel, Field, create_model
@@ -1547,48 +1547,100 @@ class VisionImageAgent:
         self.llm = ChatOpenAI(model=model_name, api_key=api_key, base_url=base_url, temperature=0.1, max_retries=5, timeout=120)
 
     def find_and_verify_single_image(self, query, master_context):
-        with DDGS() as ddgs:
-            results = list(ddgs.images(query, max_results=8))
-            for r in results:
-                url = r['image']
-                try:
-                    resp = requests.get(url, timeout=5)
-                    img = Image.open(io.BytesIO(resp.content))
-                    if img.size[0] < 320 or img.size[1] < 240: continue
+        try:
+            from PIL import Image
+        except ImportError:
+            log_tool("[bold red]❌ Vision Error: Pillow (PIL) is not installed. Skipping image verification.[/bold red]")
+            return None
 
-                    b64_resampled = self._resample_for_model(resp.content)
-                    if not b64_resampled: continue
-                    
-                    check_msg = {
-                        "role": "user",
-                        "content":[
-                            {
-                                "type": "text", 
-                                "text": f"""
-                                Is this image a high-quality, professional visual for the given context?
-                                
-                                MASTER CONTEXT:
-                                {master_context}
-                                
-                                REJECTION CRITERIA (Respond NO if any apply):
-                                1. It is a screenshot of a research paper or document text.
-                                2. It is text-heavy (charts are okay, walls of text are not).
-                                3. It is only vaguely related to the technical core of the context.
-                                
-                                If it is a PERFECT match, respond: 'YES: [detailed caption for the image]'.
-                                Otherwise, respond: 'NO'.
-                                """
-                            },
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_resampled}"}}
-                        ]
+        results = []
+        is_android = sys.platform == "android" or hasattr(sys, "getandroidapilevel")
+
+        # 1. Attempt standard DDGS only if NOT running on Python 3.13+ Android
+        if not is_android:
+            try:
+                from ddgs import DDGS
+                with DDGS() as ddgs:
+                    results = [{"image": r.get("image")} for r in ddgs.images(query, max_results=8)]
+            except Exception as e:
+                log_tool(f"[bold yellow]⚠️ Standard DDGS failed or not installed ({e}). Trying fallback scraper...[/bold yellow]")
+                results = []
+        else:
+            log_tool("[bold yellow]🤖 Android environment detected. Bypassing DDGS to avoid JNI panic; utilizing fallback scraper...[/bold yellow]")
+
+        # 2. Fallback Scraper: Executes on Android, or if standard DDGS fails
+        if not results:
+            try:
+                import urllib.parse
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+                res = requests.get(f"https://duckduckgo.com/?q={urllib.parse.quote(query)}", headers=headers, timeout=10)
+                res.raise_for_status()
+                
+                vqd_match = re.search(r'vqd\s*=\s*[\'"]?([^\'"&]+)', res.text)
+                if vqd_match:
+                    vqd = vqd_match.group(1)
+                    params = {
+                        "l": "us-en",
+                        "o": "json",
+                        "q": query,
+                        "vqd": vqd,
+                        "f": ",,,",
+                        "p": "1"
                     }
-                    
-                    res = resilient_invoke(self.llm, [check_msg]).content.strip()
-                    if res.upper().startswith("YES"):
-                        caption = res.split(":", 1)[1].strip() if ":" in res else f"Visualization of {query}"
-                        return {"url": url, "description": caption}
-                except Exception:
+                    res_images = requests.get("https://duckduckgo.com/i.js", headers=headers, params=params, timeout=10)
+                    res_images.raise_for_status()
+                    data = res_images.json()
+                    results = [{"image": r.get("image")} for r in data.get("results", [])]
+            except Exception as e:
+                log_tool(f"[bold red]❌ Image fallback scraper error: {e}[/bold red]")
+                return None
+
+        # 3. Process candidate images inside isolated error boundaries
+        for r in results:
+            url = r.get('image')
+            if not url:
+                continue
+            try:
+                resp = requests.get(url, timeout=5)
+                resp.raise_for_status()
+                img = Image.open(io.BytesIO(resp.content))
+                if img.size[0] < 320 or img.size[1] < 240: 
                     continue
+
+                b64_resampled = self._resample_for_model(resp.content)
+                if not b64_resampled: 
+                    continue
+                
+                check_msg = {
+                    "role": "user",
+                    "content":[
+                        {
+                            "type": "text", 
+                            "text": f"""
+                            Is this image a high-quality, professional visual for the given context?
+                            
+                            MASTER CONTEXT:
+                            {master_context}
+                            
+                            REJECTION CRITERIA (Respond NO if any apply):
+                            1. It is a screenshot of a research paper or document text.
+                            2. It is text-heavy (charts are okay, walls of text are not).
+                            3. It is only vaguely related to the technical core of the context.
+                            
+                            If it is a PERFECT match, respond: 'YES: [detailed caption for the image]'.
+                            Otherwise, respond: 'NO'.
+                            """
+                        },
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_resampled}"}}
+                    ]
+                }
+                
+                res = resilient_invoke(self.llm, [check_msg]).content.strip()
+                if res.upper().startswith("YES"):
+                    caption = res.split(":", 1)[1].strip() if ":" in res else f"Visualization of {query}"
+                    return {"url": url, "description": caption}
+            except Exception:
+                continue
         return None
 
     def _resample_for_model(self, image_bytes):
