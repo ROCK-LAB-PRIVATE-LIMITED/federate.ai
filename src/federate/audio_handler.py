@@ -9,6 +9,7 @@ import urllib.request
 import urllib.error
 import collections
 import numpy as np
+import time
 
 # Base directory where this python code actually lives
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,13 +31,13 @@ except ImportError:
     sherpa_onnx = None
 
 from textual.app import ComposeResult
-from textual.containers import Vertical, Horizontal
+from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widgets import Label, Input, Button
 from textual.screen import ModalScreen
 from textual import on
 
-AUDIO_CONFIG_FILE = "audio_config.json"
 FEDERATE_DIR = os.path.join(os.path.expanduser("~"), ".federate")
+AUDIO_CONFIG_FILE = os.path.join(FEDERATE_DIR, "audio_config.json")
 _DOWNLOAD_LOCK = threading.Lock()
 
 def _download_file(url: str, dest_path: str, log_cb=None, max_retries=3):
@@ -159,11 +160,16 @@ def load_audio_config():
         "stt_stop_words": "STOP LISTENING, END DICTATION",
         "stt_send_words": "EXECUTE, FINISH, SEND IT",
         "stt_delete_words": "DELETE LAST, REMOVE LAST, SCRAP THAT",
+        "stt_agent_hotword": "ATTENTION", # <-- Default invocation keyword
         "stt_device": "",
         "stt_energy_threshold": 0.005,
         "stt_silence_timeout": 1.2,
         "stt_pre_roll": 0.5,
-        "stt_min_speech_duration": 0.4
+        "stt_min_speech_duration": 0.4,
+        "stt_num_threads": 2,
+        "stt_feature_dim": 80,
+        "stt_decoding_method": "modified_beam_search",
+        "stt_max_active_paths": 14
     }
     if os.path.exists(AUDIO_CONFIG_FILE):
         try:
@@ -194,6 +200,13 @@ def clean_markdown_for_speech(text: str) -> str:
     text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
     # 5. Strip formatting characters but KEEP newlines and punctuation
     text = re.sub(r'[*_#~>]+', '', text)
+    
+    # Step A: Swap periods surrounded by numbers with " point " (e.g., 3.14 -> 3 point 14)
+    text = re.sub(r'(?<=\d)\.(?=\d)', ' point ', text)
+    
+    # Step B: Swap other internal periods with " dot " (e.g., y.com -> y dot com)
+    text = re.sub(r'(?<=\w)\.(?=\w)', ' dot ', text)
+    
     # 6. Clean up horizontal whitespace (spaces/tabs) without touching newlines
     text = re.sub(r'[ \t]+', ' ', text)
     # 7. Collapse excessive newlines into standard paragraphs
@@ -205,30 +218,106 @@ def clean_markdown_for_speech(text: str) -> str:
 class AudioConfigModal(ModalScreen[str]):
     DEFAULT_CSS = """
     AudioConfigModal { align: center middle; background: $background 60%; }
-    #audio_config_dialog { width: 70; height: auto; border: round $primary; background: $surface; padding: 1 2; }
-    .config_row { layout: horizontal; height: auto; margin-top: 1; }
-    .config_row Input { width: 1fr; margin-right: 1; }
-    #audio_actions { margin-top: 1; align: right middle; }
+    #audio_config_dialog { width: 75; height: 90%; border: round $primary; background: $surface; padding: 0; }
+    #audio_scroll { padding: 1 2; }
+    .section_label { background: $primary; color: $text; padding: 0 1; margin-top: 1; text-style: bold; width: 100%; }
+    .field_container { margin-top: 1; height: auto; width: 100%; }
+    .field_label { color: $text; text-style: bold; margin-bottom: 0; width: 100%; }
+    .field_help { color: $text-muted; text-style: italic; margin-bottom: 0; text-wrap: wrap; height: auto; width: 100%; }
+    Input { width: 100%; margin-top: 0; margin-bottom: 1; border: round $accent; }
+    #audio_actions { margin-top: 1; align: right middle; height: auto; border-top: solid $primary; padding: 1 2; }
+    #audio_actions Button { margin-left: 1; }
     """
+    
     def compose(self) -> ComposeResult:
         with Vertical(id="audio_config_dialog"):
             yield Label("🎤 Audio Configuration", classes="pane_title")
             
-            yield Label("\nTTS Settings (System Default):")
-            with Horizontal(classes="config_row"):
-                yield Input(id="tts_voice", placeholder="Voice (e.g., af_sarah)")
-                yield Input(id="tts_speed", placeholder="Speed (e.g., 1.1)")
+            with VerticalScroll(id="audio_scroll"):
+                yield Label("Text-to-Speech (TTS) Settings", classes="section_label")
                 
-            yield Label("\nSTT Settings (Hotword Mode):")
-            with Horizontal(classes="config_row"):
-                yield Input(id="stt_start", placeholder="Start Words (comma separated)")
-                yield Input(id="stt_stop", placeholder="Stop/Pause Words (comma separated)")
-            with Horizontal(classes="config_row"):
-                yield Input(id="stt_send", placeholder="Send/Execute Words (comma separated)")
-                yield Input(id="stt_delete", placeholder="Delete Words (comma separated)")
-            with Horizontal(classes="config_row"):
-                yield Input(id="stt_device", placeholder="Mic Device ID (leave blank for default)")
+                with Vertical(classes="field_container"):
+                    yield Label("Default TTS Voice", classes="field_label")
+                    yield Label("Name of the voice file to use by default (e.g., af_sarah, af_bella, am_adam).", classes="field_help")
+                    yield Input(id="tts_voice", placeholder="Voice (e.g., af_sarah)")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Voice Playback Speed", classes="field_label")
+                    yield Label("Multiplier for playback speed (typically 1.0 to 1.5).", classes="field_help")
+                    yield Input(id="tts_speed", placeholder="Speed (e.g., 1.1)")
+                    
+                yield Label("Speech-to-Text (STT) Settings", classes="section_label")
                 
+                with Vertical(classes="field_container"):
+                    yield Label("Agent/Team/Room Invocation Hotword", classes="field_label")
+                    yield Label("The keyword used to invoke specific agents, team, or room (default: ATTENTION).", classes="field_help")
+                    yield Input(id="stt_agent_hotword", placeholder="Agent Hotword (e.g., ATTENTION)")
+
+                with Vertical(classes="field_container"):
+                    yield Label("Dictation Trigger Words", classes="field_label")
+                    yield Label("Hotwords to start voice dictation (comma separated, e.g. AGENT, ASSISTANT, COMPUTER).", classes="field_help")
+                    yield Input(id="stt_start", placeholder="Start Words")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Dictation Pause/Stop Words", classes="field_label")
+                    yield Label("Hotwords to pause dictation and write to the text box (comma separated, e.g. STOP LISTENING).", classes="field_help")
+                    yield Input(id="stt_stop", placeholder="Stop/Pause Words")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Dictation Send/Execute Words", classes="field_label")
+                    yield Label("Hotwords to immediately send the transcribed message (comma separated, e.g. EXECUTE, SEND IT).", classes="field_help")
+                    yield Input(id="stt_send", placeholder="Send/Execute Words")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Dictation Deletion Words", classes="field_label")
+                    yield Label("Hotwords to clear the last appended statement (comma separated, e.g. DELETE LAST, SCRAP THAT).", classes="field_help")
+                    yield Input(id="stt_delete", placeholder="Delete Words")
+                    
+                with Vertical(classes="field_container"):
+                    yield Label("Microphone Device ID", classes="field_label")
+                    yield Label("Optional integer index of the preferred sound card input (leave blank for OS default).", classes="field_help")
+                    yield Input(id="stt_device", placeholder="Mic Device ID")
+
+                with Vertical(classes="field_container"):
+                    yield Label("Smart Microphone Energy Threshold", classes="field_label")
+                    yield Label("Silence noise gate threshold (default: 0.005). Lower values are more sensitive; higher values filter background hum.", classes="field_help")
+                    yield Input(id="stt_energy_threshold", placeholder="Threshold (e.g., 0.005)")
+
+                with Vertical(classes="field_container"):
+                    yield Label("Dictation Silence Timeout", classes="field_label")
+                    yield Label("Silence duration (seconds) before speech is finalized (default: 1.2).", classes="field_help")
+                    yield Input(id="stt_silence_timeout", placeholder="Timeout (e.g., 1.2)")
+
+                with Vertical(classes="field_container"):
+                    yield Label("Dictation Pre-Roll Buffer", classes="field_label")
+                    yield Label("Duration (seconds) of background audio captured before voice start (default: 0.5).", classes="field_help")
+                    yield Input(id="stt_pre_roll", placeholder="Pre-roll (e.g., 0.5)")
+
+                with Vertical(classes="field_container"):
+                    yield Label("Minimum Speech Duration", classes="field_label")
+                    yield Label("Ignores voice segments shorter than this threshold (default: 0.4).", classes="field_help")
+                    yield Input(id="stt_min_speech_duration", placeholder="Duration (e.g., 0.4)")
+
+                with Vertical(classes="field_container"):
+                    yield Label("Transducer Background Threads", classes="field_label")
+                    yield Label("CPU threads allocated to the background hotword transducer model (default: 2).", classes="field_help")
+                    yield Input(id="stt_num_threads", placeholder="Threads (e.g., 2)")
+
+                with Vertical(classes="field_container"):
+                    yield Label("Acoustic Feature Dimension", classes="field_label")
+                    yield Label("Zipformer neural filterbanks dimension size (default: 80).", classes="field_help")
+                    yield Input(id="stt_feature_dim", placeholder="Dimension (e.g., 80)")
+
+                with Vertical(classes="field_container"):
+                    yield Label("Decoding Method", classes="field_label")
+                    yield Label("Transducer decoding strategy (greedy_search or modified_beam_search).", classes="field_help")
+                    yield Input(id="stt_decoding_method", placeholder="Decoding Method (e.g., modified_beam_search)")
+
+                with Vertical(classes="field_container"):
+                    yield Label("Maximum Beam Search Paths", classes="field_label")
+                    yield Label("Max active beam paths tracked during modified_beam_search (default: 14).", classes="field_help")
+                    yield Input(id="stt_max_active_paths", placeholder="Max Paths (e.g., 14)")
+                    
             with Horizontal(id="audio_actions"):
                 yield Button("Save", id="save_audio_btn", variant="success")
                 yield Button("Cancel", id="cancel_audio_btn", variant="error")
@@ -237,11 +326,20 @@ class AudioConfigModal(ModalScreen[str]):
         config = load_audio_config()
         self.query_one("#tts_voice", Input).value = config.get("tts_voice", "")
         self.query_one("#tts_speed", Input).value = str(config.get("tts_speed", ""))
+        self.query_one("#stt_agent_hotword", Input).value = config.get("stt_agent_hotword", "")
         self.query_one("#stt_start", Input).value = config.get("stt_start_words", "")
         self.query_one("#stt_stop", Input).value = config.get("stt_stop_words", "")
         self.query_one("#stt_send", Input).value = config.get("stt_send_words", "")
         self.query_one("#stt_delete", Input).value = config.get("stt_delete_words", "")
         self.query_one("#stt_device", Input).value = str(config.get("stt_device", ""))
+        self.query_one("#stt_energy_threshold", Input).value = str(config.get("stt_energy_threshold", 0.005))
+        self.query_one("#stt_silence_timeout", Input).value = str(config.get("stt_silence_timeout", 1.2))
+        self.query_one("#stt_pre_roll", Input).value = str(config.get("stt_pre_roll", 0.5))
+        self.query_one("#stt_min_speech_duration", Input).value = str(config.get("stt_min_speech_duration", 0.4))
+        self.query_one("#stt_num_threads", Input).value = str(config.get("stt_num_threads", 2))
+        self.query_one("#stt_feature_dim", Input).value = str(config.get("stt_feature_dim", 80))
+        self.query_one("#stt_decoding_method", Input).value = str(config.get("stt_decoding_method", "modified_beam_search"))
+        self.query_one("#stt_max_active_paths", Input).value = str(config.get("stt_max_active_paths", 14))
 
     @on(Button.Pressed, "#save_audio_btn")
     def save_btn(self):
@@ -251,6 +349,29 @@ class AudioConfigModal(ModalScreen[str]):
         device_val = self.query_one("#stt_device", Input).value
         try: device = int(device_val) if device_val.strip() else ""
         except: device = ""
+
+        try: threshold = float(self.query_one("#stt_energy_threshold", Input).value)
+        except: threshold = 0.005
+
+        try: silence_timeout = float(self.query_one("#stt_silence_timeout", Input).value)
+        except: silence_timeout = 1.2
+
+        try: pre_roll = float(self.query_one("#stt_pre_roll", Input).value)
+        except: pre_roll = 0.5
+
+        try: min_speech = float(self.query_one("#stt_min_speech_duration", Input).value)
+        except: min_speech = 0.4
+
+        try: num_threads = int(self.query_one("#stt_num_threads", Input).value)
+        except: num_threads = 2
+
+        try: feature_dim = int(self.query_one("#stt_feature_dim", Input).value)
+        except: feature_dim = 80
+
+        decoding_method = self.query_one("#stt_decoding_method", Input).value.strip() or "modified_beam_search"
+
+        try: max_paths = int(self.query_one("#stt_max_active_paths", Input).value)
+        except: max_paths = 14
         
         config = load_audio_config()
         config.update({
@@ -260,7 +381,16 @@ class AudioConfigModal(ModalScreen[str]):
             "stt_stop_words": self.query_one("#stt_stop", Input).value,
             "stt_send_words": self.query_one("#stt_send", Input).value,
             "stt_delete_words": self.query_one("#stt_delete", Input).value,
-            "stt_device": device
+            "stt_agent_hotword": self.query_one("#stt_agent_hotword", Input).value,
+            "stt_device": device,
+            "stt_energy_threshold": threshold,
+            "stt_silence_timeout": silence_timeout,
+            "stt_pre_roll": pre_roll,
+            "stt_min_speech_duration": min_speech,
+            "stt_num_threads": num_threads,
+            "stt_feature_dim": feature_dim,
+            "stt_decoding_method": decoding_method,
+            "stt_max_active_paths": max_paths
         })
         save_audio_config(config)
         self.dismiss("update")
@@ -287,7 +417,7 @@ class TTSManager:
         self.generator_thread = threading.Thread(target=self._generator_worker, daemon=True)
         self.generator_thread.start()
         
-        self.text_stream_buffer = ""
+        self.text_stream_buffer = {}
         self.reload_config()
 
     def reload_config(self):
@@ -364,52 +494,51 @@ class TTSManager:
             try:
                 self.load_model()
                 if self.model and not self.stop_event.is_set():
-                    samples, sample_rate = self.model.create(text, voice=voice_to_use, speed=self.speed, lang="en-us")
-                    if not self.stop_event.is_set():
-                        self.audio_queue.put((samples, sample_rate))
+                    # Sentence splitting right before synthesis to avoid phoneme limit crashes on large blocks
+                    for s in re.split(r'(?<=[.!?])\s+', text):
+                        if s.strip() and not self.stop_event.is_set():
+                            samples, sample_rate = self.model.create(s.strip(), voice=voice_to_use, speed=self.speed, lang="en-us")
+                            if not self.stop_event.is_set():
+                                self.audio_queue.put((samples, sample_rate))
             except Exception:
                 pass
             finally:
                 self.generator_queue.task_done()
 
-    def start_stream(self, voice=None):
+    def start_stream(self, voice=None, agent_name: str = "default"):
         """Prepares the TTS to receive a chunked token stream."""
         self.stop_event.clear()
-        self.text_stream_buffer = ""
+        if not isinstance(self.text_stream_buffer, dict):
+            self.text_stream_buffer = {}
+        self.text_stream_buffer[agent_name] = ""
         if voice:
             self.voice = voice
         else:
             self.reload_config()
 
-    def stream_text(self, chunk: str):
-        """Appends chunks and dispatches completed sentences to the generator instantly, coupled with the active voice."""
+    def stream_text(self, chunk: str, agent_name: str = "default", voice: str = None):
+        """Appends chunks to the buffer to wait until the entire message arrives."""
         if not chunk or self.stop_event.is_set(): return
-        
-        self.text_stream_buffer += chunk
-        parts = self.split_pattern.split(self.text_stream_buffer)
-        
-        self.text_stream_buffer = ""
-        buffer = ""
-        
-        for p in parts:
-            buffer += p
-            if self.split_pattern.match(p): 
-                to_speak = clean_markdown_for_speech(buffer.strip())
-                if to_speak:
-                    self.generator_queue.put((to_speak, self.voice))
-                buffer = ""
-                
-        # Keep leftover (incomplete sentence) in the buffer
-        if buffer.strip():
-            self.text_stream_buffer = buffer
+        if not isinstance(self.text_stream_buffer, dict):
+            self.text_stream_buffer = {}
+        if agent_name not in self.text_stream_buffer:
+            self.text_stream_buffer[agent_name] = ""
+        self.text_stream_buffer[agent_name] += chunk
+        if voice:
+            self.voice = voice
 
-    def flush_stream(self):
+    def flush_stream(self, agent_name: str = "default", voice: str = None):
         """Pushes any remaining text in the buffer to the generator."""
-        if self.text_stream_buffer.strip() and not self.stop_event.is_set():
-            to_speak = clean_markdown_for_speech(self.text_stream_buffer.strip())
+        if not isinstance(self.text_stream_buffer, dict):
+            self.text_stream_buffer = {}
+        buffer = self.text_stream_buffer.get(agent_name, "")
+        voice_to_use = voice or self.voice
+        
+        if buffer.strip() and not self.stop_event.is_set():
+            to_speak = clean_markdown_for_speech(buffer.strip())
             if to_speak:
-                self.generator_queue.put((to_speak, self.voice))
-        self.text_stream_buffer = ""
+                self.generator_queue.put((to_speak, voice_to_use))
+        self.text_stream_buffer[agent_name] = ""
 
     def speak(self, text: str, voice=None):
         """Instant speaking of whole blocks."""
@@ -432,6 +561,8 @@ class STTManager:
         self.whisper_recognizer = None
         self.SAMPLE_RATE = 16000
         self.CHUNK_DURATION = 0.1
+        self.pending_prefix = ""
+        self.active_agent_map = {} # <-- Pre-compiled thread-safe cache
         self.reload_config()
 
     def reload_config(self):
@@ -440,12 +571,45 @@ class STTManager:
         self.stop_words = [w.strip().upper() for w in config.get("stt_stop_words", "").split(",") if w.strip()]
         self.send_words = [w.strip().upper() for w in config.get("stt_send_words", "").split(",") if w.strip()]
         self.delete_words = [w.strip().upper() for w in config.get("stt_delete_words", "").split(",") if w.strip()]
+        self.agent_hotword = config.get("stt_agent_hotword", "ATTENTION").strip().upper()
         
-        self.energy_threshold = config.get("stt_energy_threshold", 0.005)
-        self.silence_timeout = config.get("stt_silence_timeout", 1.2)
-        self.pre_roll = config.get("stt_pre_roll", 0.5)
-        self.min_speech_duration = config.get("stt_min_speech_duration", 0.4)
-        
+        try:
+            self.energy_threshold = float(config.get("stt_energy_threshold", 0.005))
+        except (ValueError, TypeError):
+            self.energy_threshold = 0.005
+            
+        try:
+            self.silence_timeout = float(config.get("stt_silence_timeout", 1.2))
+        except (ValueError, TypeError):
+            self.silence_timeout = 1.2
+            
+        try:
+            self.pre_roll = float(config.get("stt_pre_roll", 0.5))
+        except (ValueError, TypeError):
+            self.pre_roll = 0.5
+            
+        try:
+            self.min_speech_duration = float(config.get("stt_min_speech_duration", 0.4))
+        except (ValueError, TypeError):
+            self.min_speech_duration = 0.4
+
+        try:
+            self.num_threads = int(config.get("stt_num_threads", 2))
+        except (ValueError, TypeError):
+            self.num_threads = 2
+
+        try:
+            self.feature_dim = int(config.get("stt_feature_dim", 80))
+        except (ValueError, TypeError):
+            self.feature_dim = 80
+
+        self.decoding_method = str(config.get("stt_decoding_method", "modified_beam_search")).strip()
+
+        try:
+            self.max_active_paths = int(config.get("stt_max_active_paths", 14))
+        except (ValueError, TypeError):
+            self.max_active_paths = 14
+            
         self.device = config.get("stt_device", "")
         if self.device == "": self.device = None
 
@@ -484,21 +648,36 @@ class STTManager:
                 encoder=f"{model_dir}/encoder-epoch-99-avg-1.int8.onnx",
                 decoder=f"{model_dir}/decoder-epoch-99-avg-1.int8.onnx",
                 joiner=f"{model_dir}/joiner-epoch-99-avg-1.int8.onnx",
-                num_threads=2,
+                num_threads=getattr(self, "num_threads", 2),
                 sample_rate=self.SAMPLE_RATE,
-                feature_dim=80,
-                decoding_method="modified_beam_search",
-                max_active_paths=14
+                feature_dim=getattr(self, "feature_dim", 80),
+                decoding_method=getattr(self, "decoding_method", "modified_beam_search"),
+                max_active_paths=getattr(self, "max_active_paths", 14)
             )
 
     def start_hotword(self):
         if self.mode == "hotword": return True
         self.stop()
+        
+        self.reload_config()
+        agent_hotword = getattr(self, "agent_hotword", "ATTENTION") or "ATTENTION"
+        
+        # Compile uppercase triggers mapped to case-preserved prefixes dynamically using your hotword
+        agent_map = {f"{agent_hotword} TEAM": "@team ", f"{agent_hotword} ROOM": "@room "}
+        try:
+            from toolbox import CURRENT_APP
+            if CURRENT_APP:
+                agent_view = CURRENT_APP.query_one("#ai_agent_view")
+                for original_name in agent_view.agent_manager.agents.keys():
+                    agent_map[f"{agent_hotword} {original_name.upper()}"] = f"@{original_name} "
+        except Exception:
+            pass
+
         try:
             self.mode = "hotword"
-            self.load_models()
             self.is_running = True
             self.audio_queue = queue.Queue()
+            self.active_agent_map = agent_map # Store on instance
             self.thread = threading.Thread(target=self._hotword_loop, daemon=True)
             self.thread.start()
             return True
@@ -512,7 +691,6 @@ class STTManager:
         self.stop()
         try:
             self.mode = "smart"
-            self.load_models()
             self.is_running = True
             self.audio_queue = queue.Queue()
             self.thread = threading.Thread(target=self._smart_mic_loop, daemon=True)
@@ -526,6 +704,8 @@ class STTManager:
     def stop(self):
         self.is_running = False
         self.mode = None
+        self.pending_prefix = ""
+        self.active_agent_map = {}
 
     def _flush_whisper(self, audio_buffer, words_to_strip):
         """Helper to transcribe the buffer and strip trigger words."""
@@ -541,78 +721,197 @@ class STTManager:
         return text.strip(" .,")
 
     def _hotword_loop(self):
+        try:
+            self.load_models()
+            if self.log_callback:
+                self.log_callback("[bold green]🎙️ STT Engine Loaded & Active. Say your trigger word or 'Attention <agent>' to begin...[/bold green]")
+        except Exception as e:
+            if self.log_callback:
+                self.log_callback(f"[bold red]STT Initialization failed:[/bold red] {e}")
+            self.is_running = False
+            self.mode = None
+            return
+
         is_recording = False
         audio_buffer = []
-        trigger_stream = self.trigger_recognizer.create_stream()
+        
+        try:
+            trigger_stream = self.trigger_recognizer.create_stream()
+        except Exception:
+            self.is_running = False
+            self.mode = None
+            return
 
         def audio_callback(indata, frames, time, status):
-            if self.is_running: self.audio_queue.put(indata.copy())
+            if self.is_running: 
+                self.audio_queue.put(indata.copy())
+
         with AUDIO_LOCK:
-            input_stream = sd.InputStream(
-                samplerate=self.SAMPLE_RATE, 
-                channels=1, 
-                dtype="float32", 
-                device=self.device, 
-                callback=audio_callback
-            )
+            try:
+                # Set blocksize explicitly to 1600 (100ms) to prevent audio callback flooding and high CPU load
+                input_stream = sd.InputStream(
+                    samplerate=self.SAMPLE_RATE, 
+                    channels=1, 
+                    dtype="float32", 
+                    blocksize=int(self.SAMPLE_RATE * self.CHUNK_DURATION),
+                    device=self.device, 
+                    callback=audio_callback
+                )
+            except Exception:
+                self.is_running = False
+                self.mode = None
+                return
+
+        # Track decay timestamps
+        last_speech_time = time.time()
+        last_partial_text = ""
 
         try:
             with input_stream:
                 while self.is_running:
-                    try: chunk = self.audio_queue.get(timeout=0.5)
-                    except queue.Empty: continue
+                    try: 
+                        chunk = self.audio_queue.get(timeout=0.5)
+                    except queue.Empty: 
+                        continue
                         
-                    trigger_stream.accept_waveform(self.SAMPLE_RATE, chunk.flatten())
-                    while self.trigger_recognizer.is_ready(trigger_stream):
-                        self.trigger_recognizer.decode_stream(trigger_stream)
-                    
-                    partial_text = self.trigger_recognizer.get_result(trigger_stream).upper()
+                    # Waveform processing
+                    try:
+                        trigger_stream.accept_waveform(self.SAMPLE_RATE, chunk.flatten())
+                        while self.trigger_recognizer.is_ready(trigger_stream):
+                            self.trigger_recognizer.decode_stream(trigger_stream)
+                        partial_text = self.trigger_recognizer.get_result(trigger_stream).upper()
+                    except Exception:
+                        partial_text = ""
 
-                    if not is_recording:
-                        if any(word in partial_text for word in self.start_words):
-                            is_recording = True
-                            if self.tts_manager: self.tts_manager.stop_all_audio()
-                            if self.log_callback: self.log_callback("[dim green]🎙️ Trigger word detected. Dictation started...[/dim green]")
+                    # --- TIME-BASED DECAY / RESET GUARDRAILS ---
+                    current_time = time.time()
+                    if partial_text != last_partial_text:
+                        last_speech_time = current_time
+                        last_partial_text = partial_text
+                    elif partial_text:
+                        # Text is non-empty, but has remained unchanged. Check stale duration
+                        silence_duration = current_time - last_speech_time
+                        if silence_duration > 2.0:
                             self.trigger_recognizer.reset(trigger_stream)
+                            trigger_stream = self.trigger_recognizer.create_stream()
+                            partial_text = ""
+                            last_partial_text = ""
+                            last_speech_time = current_time
+
+                    # =========================================================================
+                    # ⚠️ CONTROL WORD EVALUATION (Runs in BOTH recording and non-recording states)
+                    # =========================================================================
+                    
+                    # 1. Delete Keyword (Removes last appended statement from UI, stops recording)
+                    if any(word in partial_text for word in self.delete_words):
+                        audio_buffer = []
+                        is_recording = False
+                        self.callback("", action="delete")
+                        if self.log_callback: self.log_callback("[dim red]🗑️ Last sentence deleted.[/dim red]")
+                        self.trigger_recognizer.reset(trigger_stream)
+                        trigger_stream = self.trigger_recognizer.create_stream()
+                        partial_text = ""
+                        last_partial_text = ""
+                        last_speech_time = current_time
+                        continue
+
+                    # 2. Stop/Pause Keyword (Ends active dictation session, flushes to box)
+                    elif any(word in partial_text for word in self.stop_words):
+                        is_recording = False
+                        text = self._flush_whisper(audio_buffer, self.stop_words)
+                        if text: 
+                            final_text = self.pending_prefix + text
+                            self.callback(final_text, action="append")
+                        self.pending_prefix = "" # Clear prefix
+                        audio_buffer = []
+                        if self.log_callback: self.log_callback("[dim yellow]🔇 Dictation paused. Review your input.[/dim yellow]")
+                        self.trigger_recognizer.reset(trigger_stream)
+                        trigger_stream = self.trigger_recognizer.create_stream()
+                        partial_text = ""
+                        last_partial_text = ""
+                        last_speech_time = current_time
+                        continue
+
+                    # 3. Send/Execute Keyword (Instantly fires the final prompt from the text box)
+                    elif any(word in partial_text for word in self.send_words):
+                        is_recording = False
+                        text = self._flush_whisper(audio_buffer, self.send_words)
+                        final_text = self.pending_prefix + text
+                        self.callback(final_text, action="submit")
+                        self.pending_prefix = "" # Clear prefix
+                        audio_buffer = []
+                        self.trigger_recognizer.reset(trigger_stream)
+                        trigger_stream = self.trigger_recognizer.create_stream()
+                        partial_text = ""
+                        last_partial_text = ""
+                        last_speech_time = current_time
+                        continue
+
+                    # =========================================================================
+                    # 🎙️ STANDARD DICTATION & TRIGGER EVALUATIONS
+                    # =========================================================================
+                    if not is_recording:
+                        # Thread-safe contiguous-only lookup from our pre-compiled active_agent_map
+                        target_prefix = ""
+                        for trigger_phrase, prefix in getattr(self, "active_agent_map", {}).items():
+                            # Strictly contiguous check (e.g. "ATTENTION RITA" must be contiguous)
+                            if trigger_phrase in partial_text:
+                                target_prefix = prefix
+                                break
+
+                        # Mutual Exclusion: Standard trigger check is strictly bypassed if an Agent target has matched
+                        trigger_matched = False
+                        if not target_prefix:
+                            trigger_matched = any(word in partial_text for word in self.start_words)
+
+                        # Clean, unblocked evaluation
+                        if target_prefix or trigger_matched:
+                            is_recording = True
+                            self.pending_prefix = target_prefix # Save the matched prefix
+                            if self.tts_manager: 
+                                self.tts_manager.stop_all_audio()
+                            
+                            if target_prefix:
+                                log_msg = f"[dim green]🎙️ {target_prefix.strip()} target detected. Dictation started...[/dim green]"
+                            else:
+                                log_msg = "[dim green]🎙️ Trigger word detected. Dictation started...[/dim green]"
+                            
+                            if self.log_callback: self.log_callback(log_msg)
+                            self.trigger_recognizer.reset(trigger_stream)
+                            trigger_stream = self.trigger_recognizer.create_stream() # Wipes buffer clean
                     else:
                         audio_buffer.append(chunk)
 
-                        # 2. Delete Keyword (Removes last appended chunk)
-                        if any(word in partial_text for word in self.delete_words):
-                            audio_buffer = []
-                            self.callback("", action="delete")
-                            if self.log_callback: self.log_callback("[dim red]🗑️ Last sentence deleted.[/dim red]")
-                            self.trigger_recognizer.reset(trigger_stream)
-
-                        # 3. Stop Keyword (Ends dictation session without sending)
-                        elif any(word in partial_text for word in self.stop_words):
-                            is_recording = False
-                            text = self._flush_whisper(audio_buffer, self.stop_words)
-                            if text: self.callback(text, action="append")
-                            audio_buffer = []
-                            if self.log_callback: self.log_callback("[dim yellow]🔇 Dictation paused. Review your input.[/dim yellow]")
-                            self.trigger_recognizer.reset(trigger_stream)
-
-                        # 4. Send/Execute Keyword (Instantly fires the prompt)
-                        elif any(word in partial_text for word in self.send_words):
-                            is_recording = False
-                            text = self._flush_whisper(audio_buffer, self.send_words)
-                            self.callback(text, action="submit")
-                            audio_buffer = []
-                            self.trigger_recognizer.reset(trigger_stream)
-
-                        # 5. Natural Pause (Appends to input box, keeps listening)
-                        elif self.trigger_recognizer.is_endpoint(trigger_stream):
+                        # 4. Natural Pause (Appends to input box, keeps listening)
+                        if self.trigger_recognizer.is_endpoint(trigger_stream):
                             text = self._flush_whisper(audio_buffer, [])
-                            if text: self.callback(text, action="append")
+                            if text: 
+                                final_text = self.pending_prefix + text
+                                self.callback(final_text, action="append")
+                                self.pending_prefix = "" 
                             audio_buffer = []
                             self.trigger_recognizer.reset(trigger_stream)
+                            trigger_stream = self.trigger_recognizer.create_stream()
 
-        except Exception as e:
+        except Exception:
             self.is_running = False
             self.mode = None
+            self.pending_prefix = ""
 
     def _smart_mic_loop(self):
+        if self.log_callback:
+            self.log_callback("[dim yellow]⏳ Initializing Smart Mic Models in background...[/dim yellow]")
+        try:
+            self.load_models()
+            if self.log_callback:
+                self.log_callback("[bold green]🎙️ Smart Mic Loaded & Active. Speak naturally...[/bold green]")
+        except Exception as e:
+            if self.log_callback:
+                self.log_callback(f"[bold red]STT Initialization failed:[/bold red] {e}")
+            self.is_running = False
+            self.mode = None
+            return
+
         chunk_samples = int(self.SAMPLE_RATE * self.CHUNK_DURATION)
         silence_chunks_limit = int(self.silence_timeout / self.CHUNK_DURATION)
         preroll_chunks_limit = int(self.pre_roll / self.CHUNK_DURATION)
@@ -662,3 +961,4 @@ class STTManager:
         except Exception as e:
             self.is_running = False
             self.mode = None
+            self.pending_prefix = ""

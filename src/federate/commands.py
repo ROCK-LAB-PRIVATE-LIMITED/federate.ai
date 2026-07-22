@@ -467,7 +467,7 @@ def process_slash_command(command: str, agent_view):
         else:
             started = agent_view.stt_manager.start_hotword()
             if started:
-                agent_view.log_to_ui("[bold green]🎙️ Hotword STT is ON. Say your trigger word to begin dictation...[/bold green]")
+                agent_view.log_to_ui("[bold green]🎙️ Hotword STT is starting, standby ...[/bold green]")
             else:
                 agent_view.log_to_ui("[bold red]Failed to start Hotword STT. Check logs/dependencies.[/bold red]")
 
