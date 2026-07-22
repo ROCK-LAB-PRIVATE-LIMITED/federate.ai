@@ -2,11 +2,11 @@
 # ==============================================================================
 #            Federate Native Windows PowerShell Updater Script
 # ==============================================================================
-$ErrorActionPreference = "Stop"
-
 param(
     [switch]$Force
 )
+
+$ErrorActionPreference = "Stop"
 
 Write-Host "======================================================================" -ForegroundColor Cyan
 Write-Host "          Federate Universal uv-Based Updater                          " -ForegroundColor Cyan
