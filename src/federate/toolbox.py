@@ -41,6 +41,12 @@ DEFAULT_GLOBAL_SETTINGS = {
     "research_min_length": 5000,
     "max_shrink_attempts": 15,
     "pdf_dpi": 150,
+    "pdf_footer_text": "FEDERATE RESEARCH REPORT",
+    "pdf_body_font": "Space Grotesk",
+    "pdf_header_font": "Michroma",
+    "pdf_code_font": "Space Mono",
+    "pdf_body_font_size": "11pt",
+    "pdf_h1_font_size": "28pt",
     "keep_verbatim_count": 2,
     "research_image_system_enabled": False,
     "research_images_max": 10,
@@ -1080,6 +1086,77 @@ def get_gmt_string():
     now_gmt = datetime.datetime.now(datetime.timezone.utc)
     return f"Todays date is {now_gmt.strftime('%Y-%m-%d')} and the current time is {now_gmt.strftime('%H:%M:%S')} GMT."
 
+DEFAULT_PDF_CSS_TEMPLATE = """
+{bundled_fonts_css}
+
+@import url('https://fonts.googleapis.com/css2?family=Michroma&family=Space+Grotesk:wght@300;400;700&family=Space+Mono&display=swap');
+
+body {{
+  font-family: "{body_font}", sans-serif;
+  font-size: {body_font_size};
+  line-height: 1.6;
+  color: #111;
+}}
+
+h1, h2, h3, h4 {{
+  font-family: "{header_font}", sans-serif;
+  letter-spacing: 0.04em;
+  margin-top: 2em;
+}}
+
+code, pre {{
+  font-family: "{code_font}", monospace;
+  font-size: 9.5pt;
+}}
+
+pre {{
+  background: #0f1117;
+  color: #e6e6e6;
+  padding: 1em;
+  border-radius: 6px;
+  overflow-x: auto;
+}}
+
+@page {{
+  size: A4;
+  margin: 20mm;
+
+  @bottom-left {{
+    content: "Page " counter(page) " of " counter(pages);
+    font-family: "{body_font}", sans-serif;
+    font-size: 8pt;
+    color: #666;
+  }}
+
+  @bottom-right {{
+    content: "{footer_text}";
+    font-family: "{header_font}", sans-serif;
+    font-size: 8pt;
+    color: #666;
+  }}
+}}
+
+h1, h2 {{
+  page-break-before: always;
+}}
+
+h1 {{
+  break-before: page;
+  text-align: center;
+  margin-top: 40%;
+  font-size: {h1_font_size};
+  letter-spacing: 0.08em;
+}}
+
+img {{
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 1.5em auto;
+  border-radius: 4px;
+}}
+"""
+
 def render_markdown_to_pdf(md_path: str, pdf_path: str):
     if not WEASYPRINT_AVAILABLE:
         safe_print(" [PDF ERROR] weasyprint not installed.")
@@ -1093,23 +1170,53 @@ def render_markdown_to_pdf(md_path: str, pdf_path: str):
 
         html_text = markdown(md_text, extensions=["fenced_code", "tables", "toc", "codehilite", "extra"])
         
-        # 1. Check for user-defined overrides inside the active workspace
-        css_file = Path("styles/style.css")
-        if not css_file.exists(): 
-            css_file = Path("style.css")
-            
-        # 2. Fall back to the system-default stylesheet bundled next to the code
-        if not css_file.exists():
+        # 1. Respect user workspace CSS overrides if present
+        css_file = Path("styles/style.css") if Path("styles/style.css").exists() else Path("style.css")
+        
+        if css_file.exists():
+            stylesheet = CSS(filename=str(css_file))
+        else:
+            # 2. Build dynamic stylesheet from global settings
+            footer_text = global_settings.get("pdf_footer_text", "FEDERATE RESEARCH REPORT")
+            body_font = global_settings.get("pdf_body_font", "Space Grotesk")
+            header_font = global_settings.get("pdf_header_font", "Michroma")
+            code_font = global_settings.get("pdf_code_font", "Space Mono")
+            body_font_size = global_settings.get("pdf_body_font_size", "11pt")
+            h1_font_size = global_settings.get("pdf_h1_font_size", "28pt")
+
+            # Resolve local bundled fonts directory relative to this package file
             package_dir = os.path.dirname(os.path.abspath(__file__))
-            css_file = Path(package_dir) / "styles" / "style.css"
+            fonts_dir = Path(package_dir) / "styles" / "fonts"
+
+            font_declarations = []
+            if (fonts_dir / "Michroma-Regular.ttf").exists():
+                font_declarations.append(
+                    f"@font-face {{ font-family: 'Michroma'; src: url('{(fonts_dir / 'Michroma-Regular.ttf').as_uri()}'); }}"
+                )
+            if (fonts_dir / "SpaceGrotesk-VariableFont_wght.ttf").exists():
+                font_declarations.append(
+                    f"@font-face {{ font-family: 'Space Grotesk'; src: url('{(fonts_dir / 'SpaceGrotesk-VariableFont_wght.ttf').as_uri()}'); }}"
+                )
+            if (fonts_dir / "SpaceGrotesk-Bold.ttf").exists():
+                font_declarations.append(
+                    f"@font-face {{ font-family: 'Space Grotesk'; font-weight: bold; src: url('{(fonts_dir / 'SpaceGrotesk-Bold.ttf').as_uri()}'); }}"
+                )
+
+            bundled_fonts_css = "\n".join(font_declarations)
+
+            css_string = DEFAULT_PDF_CSS_TEMPLATE.format(
+                bundled_fonts_css=bundled_fonts_css,
+                footer_text=footer_text,
+                body_font=body_font,
+                header_font=header_font,
+                code_font=code_font,
+                body_font_size=body_font_size,
+                h1_font_size=h1_font_size
+            )
+            stylesheet = CSS(string=css_string)
 
         html = HTML(string=html_text, base_url=str(Path.cwd()))
-        if css_file.exists():
-            # WeasyPrint automatically resolves relative font links inside the CSS
-            # (like src: url('fonts/font.ttf')) relative to the CSS filename path passed below.
-            html.write_pdf(pdf_path, stylesheets=[CSS(filename=str(css_file))])
-        else:
-            html.write_pdf(pdf_path)
+        html.write_pdf(pdf_path, stylesheets=[stylesheet])
         safe_print(f" [PDF] Success: {pdf_path}")
     except Exception as e:
         safe_print(f" [PDF ERROR] WeasyPrint failed: {e}")

@@ -485,12 +485,42 @@ class GlobalSettingsModal(ModalScreen[str]):
                     yield Label("Cooldown duration in seconds to pause execution when a 429 quota exhaustion error is encountered.", classes="field_help")
                     yield Input(id="quota_retry_delay", placeholder="e.g. 120.0")
 
-                yield Label("Parsing & Utilities", classes="section_label")
+                yield Label("Parsing & PDF Options", classes="section_label")
                 
                 with Vertical(classes="field_container"):
                     yield Label("PDF Rendering DPI", classes="field_label")
                     yield Label("DPI resolution used when converting PDF document pages to images for vision parsing.", classes="field_help")
                     yield Input(id="pdf_dpi", placeholder="e.g. 150")
+
+                with Vertical(classes="field_container"):
+                    yield Label("PDF Footer Text", classes="field_label")
+                    yield Label("Text displayed in bottom-right corner of generated PDF reports.", classes="field_help")
+                    yield Input(id="pdf_footer_text", placeholder="e.g. FEDERATE RESEARCH REPORT")
+
+                with Vertical(classes="field_container"):
+                    yield Label("PDF Body Font", classes="field_label")
+                    yield Label("Font family for the main body text (e.g. Space Grotesk, Arial, Georgia).", classes="field_help")
+                    yield Input(id="pdf_body_font", placeholder="Space Grotesk")
+
+                with Vertical(classes="field_container"):
+                    yield Label("PDF Header Font", classes="field_label")
+                    yield Label("Font family for section headings (e.g. Michroma, Space Grotesk, Times New Roman).", classes="field_help")
+                    yield Input(id="pdf_header_font", placeholder="Michroma")
+
+                with Vertical(classes="field_container"):
+                    yield Label("PDF Code Font", classes="field_label")
+                    yield Label("Font family for code blocks (e.g. Space Mono, Courier New).", classes="field_help")
+                    yield Input(id="pdf_code_font", placeholder="Space Mono")
+
+                with Vertical(classes="field_container"):
+                    yield Label("PDF Body Font Size", classes="field_label")
+                    yield Label("Font size for main body text (e.g. 11pt, 12pt).", classes="field_help")
+                    yield Input(id="pdf_body_font_size", placeholder="11pt")
+
+                with Vertical(classes="field_container"):
+                    yield Label("PDF Title (H1) Font Size", classes="field_label")
+                    yield Label("Font size for H1 title text (e.g. 28pt, 24pt).", classes="field_help")
+                    yield Input(id="pdf_h1_font_size", placeholder="28pt")
 
                 yield Label("Deep Research Image Companion (Vision Subsystem)", classes="section_label")
                 
@@ -536,6 +566,12 @@ class GlobalSettingsModal(ModalScreen[str]):
         self.query_one("#research_min_length", Input).value = str(config.get("research_min_length", 5000))
         self.query_one("#max_shrink_attempts", Input).value = str(config.get("max_shrink_attempts", 15))
         self.query_one("#pdf_dpi", Input).value = str(config.get("pdf_dpi", 150))
+        self.query_one("#pdf_footer_text", Input).value = str(config.get("pdf_footer_text", "FEDERATE RESEARCH REPORT"))
+        self.query_one("#pdf_body_font", Input).value = str(config.get("pdf_body_font", "Space Grotesk"))
+        self.query_one("#pdf_header_font", Input).value = str(config.get("pdf_header_font", "Michroma"))
+        self.query_one("#pdf_code_font", Input).value = str(config.get("pdf_code_font", "Space Mono"))
+        self.query_one("#pdf_body_font_size", Input).value = str(config.get("pdf_body_font_size", "11pt"))
+        self.query_one("#pdf_h1_font_size", Input).value = str(config.get("pdf_h1_font_size", "28pt"))
         self.query_one("#keep_verbatim_count", Input).value = str(config.get("keep_verbatim_count", 1))
         
         self.query_one("#research_images_max", Input).value = str(config.get("research_images_max", 10))
@@ -607,6 +643,13 @@ class GlobalSettingsModal(ModalScreen[str]):
         try: pdf_dpi_val = int(self.query_one("#pdf_dpi", Input).value.strip())
         except ValueError: pdf_dpi_val = 150
 
+        pdf_footer = self.query_one("#pdf_footer_text", Input).value.strip() or "FEDERATE RESEARCH REPORT"
+        pdf_body_font = self.query_one("#pdf_body_font", Input).value.strip() or "Space Grotesk"
+        pdf_header_font = self.query_one("#pdf_header_font", Input).value.strip() or "Michroma"
+        pdf_code_font = self.query_one("#pdf_code_font", Input).value.strip() or "Space Mono"
+        pdf_body_size = self.query_one("#pdf_body_font_size", Input).value.strip() or "11pt"
+        pdf_h1_size = self.query_one("#pdf_h1_font_size", Input).value.strip() or "28pt"
+
         try: keep_verbatim = int(self.query_one("#keep_verbatim_count", Input).value.strip())
         except ValueError: keep_verbatim = 1
 
@@ -638,6 +681,12 @@ class GlobalSettingsModal(ModalScreen[str]):
             "research_min_length": min_len,
             "max_shrink_attempts": max_shrink,
             "pdf_dpi": pdf_dpi_val,
+            "pdf_footer_text": pdf_footer,
+            "pdf_body_font": pdf_body_font,
+            "pdf_header_font": pdf_header_font,
+            "pdf_code_font": pdf_code_font,
+            "pdf_body_font_size": pdf_body_size,
+            "pdf_h1_font_size": pdf_h1_size,
             "keep_verbatim_count": keep_verbatim,
             "research_image_system_enabled": img_system_enabled,
             "research_images_max": img_max,
@@ -2885,7 +2934,7 @@ class AIAgentView(Vertical):
             self.app.call_from_thread(self._toggle_spinner, True, agent.name, agent.color)
             # --- NEW: Prepare the TTS voice stream for this specific agent ---
             if getattr(self, "tts_enabled", False):
-                self.tts_manager.start_stream(voice=agent.tts_voice)
+                self.tts_manager.start_stream(voice=agent.tts_voice, agent_name=agent.name)
             # Use a unique thread_id per agent/session
             thread_id = override_thread_id or f"{self.session_manager.current_session_id}_{agent.name}"
             run_config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 5000}
@@ -3134,7 +3183,7 @@ class AIAgentView(Vertical):
                                     full_ai_response += text_chunk
                                     # --- NEW: Stream text chunk to TTS engine ---
                                     if getattr(self, "tts_enabled", False):
-                                        self.tts_manager.stream_text(text_chunk)
+                                        self.tts_manager.stream_text(text_chunk, agent_name=agent.name, voice=agent.tts_voice)
                                     if not current_ai_widget:
                                         self.log_to_ui(Rule(style="dim"))
                                         self.log_to_ui(f"[bold {agent.color}]{agent.name}:[/bold {agent.color}]", is_markdown=False)
@@ -3178,7 +3227,7 @@ class AIAgentView(Vertical):
 
                                             # Clean up streaming variables for the next turn
                                             if getattr(self, "tts_enabled", False):
-                                                self.tts_manager.flush_stream()
+                                                self.tts_manager.flush_stream(agent_name=agent.name, voice=agent.tts_voice)
                                             current_ai_widget = None
                                             current_ai_text = ""
 
