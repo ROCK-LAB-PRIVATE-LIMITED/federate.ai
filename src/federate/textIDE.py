@@ -1157,7 +1157,23 @@ class FEDERATE_IDE(App):
         self.app.push_screen(VenvManagerModal(self.get_venv_root(), self.active_venv_name), handle_venv_mgr)
 
 def main():
-    initial_file = sys.argv[1] if len(sys.argv) > 1 else None
+    import sys
+    import shutil
+    import subprocess
+    import shlex
+
+    if "-record" in sys.argv and shutil.which("asciinema"):
+        args_without_record = [arg for arg in sys.argv[1:] if arg != "-record"]
+        if sys.argv[0].endswith(".py"):
+            cmd_list = [sys.executable, sys.argv[0]] + args_without_record
+        else:
+            cmd_list = [sys.argv[0]] + args_without_record
+        quoted_cmd = " ".join(shlex.quote(arg) for arg in cmd_list)
+        res = subprocess.run(["asciinema", "rec", "-c", quoted_cmd, "footage.cast"])
+        sys.exit(res.returncode)
+
+    args = [arg for arg in sys.argv[1:] if arg != "-record"]
+    initial_file = args[0] if args else None
     app = FEDERATE_IDE(initial_file=initial_file)
     app.run()
 

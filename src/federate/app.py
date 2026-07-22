@@ -290,6 +290,21 @@ class Federate(App):
         self.push_screen(DirectoryModal(current_path), handle_dir_selection)
 
 def main():
+    import sys
+    import shutil
+    import subprocess
+    import shlex
+
+    if "-record" in sys.argv and shutil.which("asciinema"):
+        args_without_record = [arg for arg in sys.argv[1:] if arg != "-record"]
+        if sys.argv[0].endswith(".py"):
+            cmd_list = [sys.executable, sys.argv[0]] + args_without_record
+        else:
+            cmd_list = [sys.argv[0]] + args_without_record
+        quoted_cmd = " ".join(shlex.quote(arg) for arg in cmd_list)
+        res = subprocess.run(["asciinema", "rec", "-c", quoted_cmd, "footage.cast"])
+        sys.exit(res.returncode)
+
     log_trace("Spawning standard Textual Application loop")
     app = Federate()
     app.run()
