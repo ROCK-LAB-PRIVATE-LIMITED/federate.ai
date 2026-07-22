@@ -24,7 +24,7 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 
 # 2. Get current installed version
 $installedVer = $null
-$toolList = uv tool list 2>$null
+$toolList = (uv tool list 2>$null) -join "`n"
 if ($toolList -match 'federate\s+v([\d\.]+)') {
     $installedVer = $Matches[1]
 }
