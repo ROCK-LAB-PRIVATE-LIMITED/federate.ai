@@ -2475,9 +2475,20 @@ class AIAgentView(Vertical):
                     widget = Static(Markdown(msg_to_render), classes="chat_msg")
                 else:
                     try:
-                        widget = Static(Text.from_markup(msg), classes="chat_msg", markup=False)
+                        parsed_text = Text.from_markup(msg)
+                        
+                        # Pre-validate all styles immediately to catch MissingStyle before the async rendering phase
+                        if not hasattr(self, "_dummy_console"):
+                            from rich.console import Console
+                            self._dummy_console = Console()
+                            
+                        for span in parsed_text.spans:
+                            if isinstance(span.style, str):
+                                self._dummy_console.get_style(span.style)
+                                
+                        widget = Static(parsed_text, classes="chat_msg", markup=False)
                     except Exception:
-                        # Fallback to plain, unparsed text if the markup parser fails on raw bracketed logs
+                        # Universal fallback to raw string if the text contains invalid bracket markup (e.g. code arrays)
                         widget = Static(Text(msg), classes="chat_msg", markup=False)
             elif isinstance(msg, (Rule, Text, Markdown)):
                 widget = Static(msg, classes="chat_msg", markup=False)
