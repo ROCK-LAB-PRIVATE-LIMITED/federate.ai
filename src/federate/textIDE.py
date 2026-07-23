@@ -503,6 +503,12 @@ class FEDERATE_IDE(App):
         Binding("f5", "switch_agent", "Switch Agent", show=False),
     ]
     
+    def notify(self, message, *args, **kwargs):
+        """Catch-all to prevent bracket-parsing crashes in UI toasts."""
+        from rich.markup import escape
+        safe_msg = escape(str(message)) if isinstance(message, str) else message
+        super().notify(safe_msg, *args, **kwargs)
+    
     def __init__(self, initial_file: str = None):
         super().__init__()
         self.initial_file = initial_file
@@ -1032,11 +1038,12 @@ class FEDERATE_IDE(App):
         """Runs on the main thread to instantly update the UI without calculations."""
         tree = self.query_one("#outline_tree", Tree)
         tree.clear()
-        tree.root.set_label(root_label)
+        from rich.markup import escape
+        tree.root.set_label(escape(root_label))
         
         def populate(ui_node, v_nodes):
             for v_node in v_nodes:
-                branch = ui_node.add(v_node["label"])
+                branch = ui_node.add(escape(v_node["label"]))
                 populate(branch, v_node["children"])
                 
         populate(tree.root, virtual_nodes)

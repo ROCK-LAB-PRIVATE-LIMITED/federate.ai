@@ -2396,7 +2396,49 @@ class AIAgentView(Vertical):
     def action_open_active_config(self):
         """F4: Opens the editor. Distinguishes between Renaming and Cloning."""
         def handle_modal_result(result_tuple):
-            if not result_tuple or result_tuple[0] != "save":
+            if not result_tuple:
+                return
+                
+            action = result_tuple[0]
+            
+            if action == "delete":
+                agent_to_delete = result_tuple[1]
+                if len(self.agent_manager.agents) <= 1:
+                    self.notify("Error: You cannot delete your last remaining agent.", severity="error")
+                    return
+                
+                # Delete agent config and clear from executors
+                self.agent_manager.delete_agent(agent_to_delete.name)
+                self.agent_executors.pop(agent_to_delete.name, None)
+                
+                # Wipe the API keys from the OS Keyring for security
+                try:
+                    import keyring
+                    keyring.delete_password("Federate", f"agent_key_{agent_to_delete.name.lower().replace(' ', '_')}")
+                    keyring.delete_password("Federate", f"agent_backup_key_{agent_to_delete.name.lower().replace(' ', '_')}")
+                except Exception:
+                    pass
+                
+                # Switch to the next available agent
+                next_agent_name = list(self.agent_manager.agents.keys())[0]
+                self.select_agent(next_agent_name)
+                
+                # Update default agent just in case the deleted one was the default
+                self.agent_manager.set_default_agent_name(next_agent_name)
+                
+                # Update UI
+                self.log_to_ui(f"[bold red]Agent '{agent_to_delete.name}' deleted.[/bold red] Switched to '{next_agent_name}'.")
+                self.update_status_bar()
+                
+                # Sync welcome banner
+                new_renderable = get_welcome_banner(self, specific_agent=next_agent_name, return_renderable=True)
+                banners = self.query(".welcome_banner_box")
+                if banners:
+                    for banner in banners:
+                        banner.update(new_renderable)
+                return
+
+            if action != "save":
                 return
             
             # Extract the new config and the 'is_new' flag
@@ -2518,7 +2560,8 @@ class AIAgentView(Vertical):
                 base_dir = str(app.query_one("#dir_tree").path) if app else os.getcwd()
             except Exception:
                 base_dir = os.getcwd()
-            self.query_one("#ai_cwd_label", Label).update(base_dir)
+            # Use Text() to entirely disable markup parsing on raw paths
+            self.query_one("#ai_cwd_label", Label).update(Text(base_dir))
             self.query_one("#ai_config_label", Label).update(f"[F3] {mode_str}")
             self.query_one("#ai_token_label", Label).update(agent_info)
         except Exception: pass
@@ -2530,7 +2573,7 @@ class AIAgentView(Vertical):
             backup_str = " [B]" if self.active_agent.use_backup else ""
             if self.shell_mode:
                 folder = os.path.basename(os.getcwd()) or os.getcwd()
-                label.update(f"[bold red]shell@{folder} %[/bold red]")
+                label.update(Text.from_markup(f"[bold red]shell@{escape(folder)} %[/bold red]"))
             else:
                 label.update(f"[bold {self.active_agent.color}]{self.active_agent.name}{backup_str}>[/bold {self.active_agent.color}]")
         except Exception: pass

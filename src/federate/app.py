@@ -214,6 +214,12 @@ class Federate(App):
         Binding("ctrl+q", "quit", "Quit", priority=True),
     ]
     
+    def notify(self, message, *args, **kwargs):
+        """Catch-all to prevent bracket-parsing crashes in UI toasts."""
+        from rich.markup import escape
+        safe_msg = escape(str(message)) if isinstance(message, str) else message
+        super().notify(safe_msg, *args, **kwargs)
+    
     def __init__(self):
         super().__init__()
         # Satisfy agent.py's execute_code configuration dependencies
