@@ -2258,8 +2258,7 @@ class AIAgentView(Vertical):
         return final_result[0]
     
     def action_clear_all_contexts(self):
-        if self._running_agents:
-            self.action_abort() 
+        self.action_abort() 
         self.session_manager.clear_all_contexts()
         self.agent_executors = {} # Clear cached executors so updated schemas load fresh
         self.agent_mode = "PLAN"
@@ -3226,7 +3225,7 @@ class AIAgentView(Vertical):
                 while consecutive_fail_count < MAX_CONSECUTIVE_FAILS:
                     try:
                         for event_type, event_data in executor.stream(stream_input, config=run_config, stream_mode=["messages", "updates"]):
-                            if toolbox.ABORT_EVENT.is_set() or (batch_id != 0 and batch_id != self.current_batch_id):
+                            if toolbox.ABORT_EVENT.is_set() or (batch_id != 0 and (batch_id != self.current_batch_id or batch_id in self.session_manager.aborted_batch_ids)):
                                 raise Exception("Operation forcefully aborted or interrupted by user.")
 
                             if event_type == "messages":
@@ -3340,6 +3339,8 @@ class AIAgentView(Vertical):
 
                 # Broadcast AI response and tool outputs to others
                 if full_ai_response.strip() or tool_outputs or tool_calls:
+                    if batch_id != 0 and (batch_id != self.current_batch_id or batch_id in self.session_manager.aborted_batch_ids):
+                        return
                     ai_response = full_ai_response.strip()
                     # 1. Save to session manager so others can see it
                     self.session_manager.broadcast_message(agent.name, ai_response, is_ai=True, tool_outputs=tool_outputs, tool_calls=tool_calls)
@@ -3372,7 +3373,7 @@ class AIAgentView(Vertical):
                 error_str = str(e)
 
                 # Silence abort/interrupt errors
-                if "forcefully aborted or interrupted by user" in error_str.lower():
+                if any(term in error_str.lower() for term in ["aborted", "interrupted"]):
                     return
 
                 # Broad, guaranteed mitigation check for any API validation, schema, or Bad Request (400) errors

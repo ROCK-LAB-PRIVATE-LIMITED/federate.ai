@@ -517,8 +517,7 @@ def process_slash_command(command: str, agent_view):
             agent_view.log_to_ui(f"[bold red]Agent '{raw_name}' not found.[/bold red]")
 
     elif cmd == "/clear_all":
-        agent_view.session_manager.clear_all_contexts()
-        agent_view.log_to_ui("[bold green]All agent contexts cleared.[/bold green]")
+        agent_view.action_clear_all_contexts()
     
     elif cmd == "/dpi":
         if not args:
