@@ -162,6 +162,8 @@ def dispatch_subagent(task_description: str) -> str:
                 break # Successfully completed the stream without network crashing
                 
             except Exception as e:
+                if "aborted" in str(e).lower() or "interrupted" in str(e).lower():
+                    raise e
                 log_tool(f"[bold red]SWE Subagent network interrupted. Retrying in 15s... ({e})[/bold red]")
                 time.sleep(15)
 

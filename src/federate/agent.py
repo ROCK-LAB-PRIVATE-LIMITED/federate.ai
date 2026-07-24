@@ -11,7 +11,7 @@ from markdownify import markdownify as md
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.binding import Binding
-from textual.widgets import RichLog, Input, Label, Button, Select, Static, ProgressBar, Checkbox, ListView, ListItem, TextArea
+from textual.widgets import RichLog, Input, Label, Button, Select, Static, ProgressBar, Checkbox, ListView, ListItem, TextArea, Switch
 from textual.screen import ModalScreen
 from textual import work, on
 from textual.message import Message
@@ -869,17 +869,25 @@ class ConfigModal(ModalScreen[str]):
     .section_label { background: $primary; color: $text; padding: 0 1; margin-top: 1; text-style: bold; }
     #abilities_container {
         border: round $primary;
-        height: 10;
+        height: auto;
+        max-height: 14;
         padding: 0 1;
         margin-top: 1;
         background: $boost;
     }
+    .ability_row { layout: horizontal; height: auto; align: left middle; margin-bottom: 0; }
+    .enable_cb { width: 65%; }
+    .disable_cb { width: 35%; color: $error; }
     """
     def __init__(self, agent_config: AgentConfig, agent_manager: AgentManager):
-            super().__init__()
-            self.agent_config = agent_config
-            self.agent_manager = agent_manager
-            self.high_priv_tools = ["read_file", "curl_url", "save_file", "edit_file", "dispatch_subagent", "run_terminal_command", "visual_computer_operation"]
+        super().__init__()
+        self.agent_config = agent_config
+        self.agent_manager = agent_manager
+        self.all_manageable_tools = [
+            "list_files", "search_web", "perform_research", "manage_agenda",
+            "read_file", "curl_url", "save_file", "edit_file", 
+            "dispatch_subagent", "run_terminal_command", "visual_computer_operation"
+        ]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="config_dialog"):
@@ -923,12 +931,17 @@ class ConfigModal(ModalScreen[str]):
                         yield Checkbox("Vision Capable", id="ai_vision_capable", value=self.agent_config.is_capable_vision)
                         yield Checkbox("Disable All Tools", id="ai_disable_all_tools", value=self.agent_config.disable_all_tools) # <-- NEW
 
-                    yield Label("Agent Abilities (Enabled in SAFE mode)", classes="section_label")
+                    yield Label("Agent Abilities (Enable in SAFE mode / Disable tool)", classes="section_label")
                     with VerticalScroll(id="abilities_container"):
-                        for tool_name in self.high_priv_tools:
+                        disabled_list = getattr(self.agent_config, "disabled_tools", ["visual_computer_operation"])
+                        for tool_name in self.all_manageable_tools:
                             is_enabled = tool_name in self.agent_config.enabled_tools
+                            is_disabled = tool_name in disabled_list
                             label = "Autonomous Visual Computer Operation" if tool_name == "visual_computer_operation" else tool_name.replace("_", " ").title()
-                            yield Checkbox(label, id=f"ability_{tool_name}", value=is_enabled)
+                            with Horizontal(classes="ability_row"):
+                                yield Checkbox(f"Enable (Safe): {label}", id=f"ability_{tool_name}", value=is_enabled, classes="enable_cb")
+                                yield Checkbox("Force Disable", id=f"disable_{tool_name}", value=is_disabled, classes="disable_cb")
+
 
                     yield Label("Backup Inference", classes="section_label")
                     agent_options = [("Manual Entry", "manual")] + [(name, name) for name in self.agent_manager.agents.keys()]
@@ -983,9 +996,12 @@ class ConfigModal(ModalScreen[str]):
     
     def _get_current_fields(self):
         enabled_tools = []
-        for tool_name in self.high_priv_tools:
+        disabled_tools = []
+        for tool_name in self.all_manageable_tools:
             if self.query_one(f"#ability_{tool_name}", Checkbox).value:
                 enabled_tools.append(tool_name)
+            if self.query_one(f"#disable_{tool_name}", Checkbox).value:
+                disabled_tools.append(tool_name)
 
         return {
             "name": self.query_one("#ai_name", Input).value.strip(),
@@ -993,7 +1009,7 @@ class ConfigModal(ModalScreen[str]):
             "model": self.query_one("#ai_model", Input).value.strip(),
             "base_url": self.query_one("#ai_base_url", Input).value.strip(),
             "is_capable_vision": self.query_one("#ai_vision_capable", Checkbox).value,
-            "disable_all_tools": self.query_one("#ai_disable_all_tools", Checkbox).value, # <-- NEW
+            "disable_all_tools": self.query_one("#ai_disable_all_tools", Checkbox).value,
             "api_key": self.query_one("#ai_api_key", Input).value.strip(),
             "color": self.query_one("#ai_color", Input).value.strip() or "#00FFFF",
             "backup_model": self.query_one("#ai_backup_model", Input).value.strip(),
@@ -1001,8 +1017,9 @@ class ConfigModal(ModalScreen[str]):
             "backup_api_key": self.query_one("#ai_backup_api_key", Input).value.strip(),
             "use_backup": self.query_one("#ai_use_backup", Checkbox).value,
             "enabled_tools": enabled_tools,
-            "tts_voice": (self.query_one("#ai_tts_voice", Select).value if self.query_one("#ai_tts_voice", Select).value != Select.BLANK else None) or "af_sarah", # <-- NEW
-            "pronouns": (self.query_one("#ai_pronouns", Select).value if self.query_one("#ai_pronouns", Select).value != Select.BLANK else None) or "she/her" # <-- NEW
+            "disabled_tools": disabled_tools,
+            "tts_voice": (self.query_one("#ai_tts_voice", Select).value if self.query_one("#ai_tts_voice", Select).value != Select.BLANK else None) or "af_sarah",
+            "pronouns": (self.query_one("#ai_pronouns", Select).value if self.query_one("#ai_pronouns", Select).value != Select.BLANK else None) or "she/her"
         }
 
     def _apply_save(self, is_new: bool):
@@ -1054,6 +1071,7 @@ class ConfigModal(ModalScreen[str]):
             backup_base_url=fields["backup_base_url"],
             use_backup=fields["use_backup"],
             enabled_tools=fields["enabled_tools"],
+            disabled_tools=fields["disabled_tools"],
             tts_voice=fields["tts_voice"], # <-- NEW
             pronouns=fields["pronouns"], # <-- NEW
             disable_all_tools=fields["disable_all_tools"] # <-- NEW
@@ -2729,7 +2747,7 @@ class AIAgentView(Vertical):
                 distill_journey, delete_passive_skill, mark_quagmire, 
                 get_user_clarification, search_episodic_memory, retrieve_episodic_memory
             ]
-            allowed_names = {t.name for t in tools}
+            allowed_names = {getattr(t, "name", t) for t in tools}
             
             # Map out all executable, terminal, research, active skill development, and high-privilege tools
             other_tool_names = [
@@ -2753,12 +2771,13 @@ class AIAgentView(Vertical):
             dummy_tools = []
             for name in other_tool_names:
                 dummy_tools.append(StructuredTool.from_function(
-                    func=lambda *args, name=name, **kwargs: f"Error: Tool '{name}' is unauthorized. All tools are disabled for this agent.",
+                    func=lambda *args, n=name, **kwargs: f"Error: Tool '{n}' is unauthorized. All tools are disabled for this agent.",
                     name=name,
                     description=f"Unauthorized placeholder."
                 ))
                 
             tools.extend(dummy_tools)
+            final_tools = tools
             
             # Intercept the tool-binding interface to hide restricted tools from the LLM's system prompt
             class RestrictedModelWrapper:
@@ -2766,7 +2785,7 @@ class AIAgentView(Vertical):
                     self.model = model
                     self.allowed_names = allowed_names
                 def bind_tools(self, tools, **kwargs):
-                    allowed_bind_tools = [t for t in tools if t.name in self.allowed_names]
+                    allowed_bind_tools = [t for t in tools if getattr(t, "name", t) in self.allowed_names]
                     return self.model.bind_tools(allowed_bind_tools, **kwargs)
                 def __getattr__(self, name):
                     return getattr(self.model, name)
@@ -2774,11 +2793,17 @@ class AIAgentView(Vertical):
             llm = RestrictedModelWrapper(llm, allowed_names)
             
         else:
-            # (Standard Tool compilation path for unrestricted agents)
-            tools =[list_files, search_web, perform_research, manage_agenda, update_core_memory, save_skill, read_skill, distill_journey, delete_passive_skill, list_skills, mark_quagmire, get_user_clarification, search_episodic_memory, retrieve_episodic_memory, prepare_active_skill, finalize_active_skill, manage_active_skill, fix_active_skill]
+            disabled_tools = getattr(agent_config, "disabled_tools", ["visual_computer_operation"])
+            def is_tool_disabled(t_name: str) -> bool:
+                if t_name in disabled_tools:
+                    return True
+                computer_tools = {"take_screenshot", "click_at_current_location", "move_cursor_absolute", "move_cursor_relative", "send_scroll", "inject_keyboard_input"}
+                if t_name in computer_tools and "visual_computer_operation" in disabled_tools:
+                    return True
+                return False
 
-            dynamic_tools = load_dynamic_tools(agent_config.name)
-            tools.extend(dynamic_tools)
+            raw_tools = [list_files, search_web, perform_research, manage_agenda, update_core_memory, save_skill, read_skill, distill_journey, delete_passive_skill, list_skills, mark_quagmire, get_user_clarification, search_episodic_memory, retrieve_episodic_memory, prepare_active_skill, finalize_active_skill, manage_active_skill, fix_active_skill]
+            raw_tools.extend(load_dynamic_tools(agent_config.name))
 
             high_priv_map = {
                 "read_file": read_file,
@@ -2799,12 +2824,11 @@ class AIAgentView(Vertical):
 
             def make_wrapped_tool(t_obj):
                 def wrapped_func(*args, **kwargs):
-                    agent_name = agent_config.name # Directly read the active agent name to bypass thread-local limits
+                    agent_name = agent_config.name
                     confirmed = self.confirm_tool_execution(t_obj.name, kwargs, agent_name=agent_name)
                     if not confirmed:
                         return f"Error: Tool execution of '{t_obj.name}' was rejected by the user."
-                    res = t_obj.func(*args, **kwargs)
-                    return res
+                    return t_obj.func(*args, **kwargs)
                 return StructuredTool(
                     name=t_obj.name,
                     description=t_obj.description,
@@ -2813,19 +2837,47 @@ class AIAgentView(Vertical):
                 )
 
             if self.agent_mode == "EXECUTE":
-                tools.extend(list(high_priv_map.values()))
+                for tname, tool_obj in high_priv_map.items():
+                    raw_tools.append(tool_obj)
             elif self.agent_mode == "INTERMEDIATE":
                 for tname, tool_obj in high_priv_map.items():
-                    tools.append(make_wrapped_tool(tool_obj))
+                    raw_tools.append(make_wrapped_tool(tool_obj))
             else: # PLAN (SAFE) Mode
                 for tname in agent_config.enabled_tools:
                     if tname == "visual_computer_operation":
                         for ct in ["take_screenshot", "click_at_current_location", "move_cursor_absolute", "move_cursor_relative", "send_scroll", "inject_keyboard_input"]:
-                            tools.append(make_wrapped_tool(high_priv_map[ct]))
+                            raw_tools.append(make_wrapped_tool(high_priv_map[ct]))
                     elif tname in high_priv_map:
-                        tools.append(make_wrapped_tool(high_priv_map[tname]))
-        
-        executor = create_react_agent(llm, tools, checkpointer=shared_memory)
+                        raw_tools.append(make_wrapped_tool(high_priv_map[tname]))
+            
+            # Enforce hard disablers
+            final_tools = []
+            allowed_names = set()
+            for t_obj in raw_tools:
+                if is_tool_disabled(t_obj.name):
+                    dummy = StructuredTool.from_function(
+                        func=lambda *args, name=t_obj.name, **kwargs: f"Error: Tool '{name}' is UNAUTHORIZED for this agent. You are forbidden from using it.",
+                        name=t_obj.name,
+                        description="Unauthorized placeholder."
+                    )
+                    final_tools.append(dummy)
+                else:
+                    final_tools.append(t_obj)
+                    allowed_names.add(t_obj.name)
+
+            class RestrictedModelWrapper:
+                def __init__(self, model, allowed_names):
+                    self.model = model
+                    self.allowed_names = allowed_names
+                def bind_tools(self, tools, **kwargs):
+                    allowed_bind_tools = [t for t in tools if getattr(t, "name", t) in self.allowed_names]
+                    return self.model.bind_tools(allowed_bind_tools, **kwargs)
+                def __getattr__(self, name):
+                    return getattr(self.model, name)
+                    
+            llm = RestrictedModelWrapper(llm, allowed_names)
+
+        executor = create_react_agent(llm, final_tools, checkpointer=shared_memory)
         self.agent_executors[agent_config.name] = executor
         return executor
 
@@ -3385,7 +3437,7 @@ class AIAgentView(Vertical):
                     new_thread_id = f"{thread_id}_rst_{int(time.time())}"
                     # Remove from running agents so it can re-trigger
                     self._running_agents.discard(agent.name)
-                    return self.run_agent_task(agent, prompt, override_thread_id=new_thread_id)
+                    return self.run_agent_task(agent, prompt, override_thread_id=new_thread_id, batch_id=batch_id)
 
                 self.log_to_ui(f"[bold red]Execution Error ({agent.name}):[/bold red] {e}")
         finally:

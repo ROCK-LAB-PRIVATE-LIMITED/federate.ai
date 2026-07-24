@@ -57,6 +57,7 @@ class AgentConfig:
     backup_base_url: str = "https://openrouter.ai/api/v1"
     use_backup: bool = False
     enabled_tools: List[str] = field(default_factory=list)
+    disabled_tools: List[str] = field(default_factory=lambda: ["visual_computer_operation"])
     tts_voice: str = "af_sarah" # <-- NEW: Unique Agent Voice Field (Default: Sarah)
     pronouns: str = "she/her" # <-- NEW: Binary Pronoun Field (Default: she/her)
     disable_all_tools: bool = False # <-- NEW: Disable All Tools Checkbox
@@ -136,14 +137,21 @@ class AgentConfig:
             computer_section = "COMPUTER AUTOMATION RULES:\n- Computer interaction and screen automation are completely disabled. You do not have access to any vision or cursor tools."
             active_list_str = "None (All external executable tools disabled)"
         else:
-            agenda_section = """AGENDA & SYNC RULES:
+            disabled_list = getattr(self, "disabled_tools", ["visual_computer_operation"])
+            if "manage_agenda" in disabled_list:
+                agenda_section = "AGENDA & SYNC RULES:\n- Agenda management is disabled for you."
+            else:
+                agenda_section = """AGENDA & SYNC RULES:
 - check for the user's current agenda and assist planning when the user greets you with good morning or good evening.
 - maintain the user's tasks using the `manage_agenda` tool.
 - `goals.json` is your absolute master record.
 - If a goal title matches a feature in the GUI, sync the status.
 - Never delete a local goal unless the user explicitly tells you to."""
 
-            computer_section = """COMPUTER AUTOMATION RULES:
+            if "visual_computer_operation" in disabled_list:
+                computer_section = "COMPUTER AUTOMATION RULES:\n- Computer interaction and screen automation are disabled for you."
+            else:
+                computer_section = """COMPUTER AUTOMATION RULES:
 - If asked to control or interact with the computer, you MUST take an initial screenshot using `take_screenshot` to identify the current screen state and locate the current cursor position (which will be marked with a RED crosshair).
 - Grid Boundaries: The display uses a standard 0-indexed coordinate space starting at (0, 0) in the top-left.
 - Relative Cursor Navigation Loop: Do not try to blindly "one-shot" click targets. Instead, use an iterative visual servo loop to verify and adjust your position:
@@ -154,7 +162,10 @@ class AgentConfig:
 - Interaction: Once the cursor is aligned correctly on the target, call `click_at_current_location`, `inject_keyboard_input`, or `send_scroll` to perform the action.
 - Automatic Visual Feedback: Every computer usage action automatically takes and returns a fresh screenshot with the updated cursor position. Use this visual feedback on every single step to confirm the previous action succeeded before proceeding.
 - DO NOT SEND CLICKS OR KEYBOARD INPUTS UNTILL YOU HAVE CONFIRMED THAT THE CROSSHAIR IS EXACTLY ON THE INTENDED LOCATION."""
-            active_list_str = active_list
+
+            active_skills = [d for d in active_skills if d not in disabled_list]
+            active_list_str = ", ".join(active_skills) if active_skills else "No executable tools learned yet."
+
 
         if self.pronouns == "neither":
             prompt = f"{self.backstory}\n\n{BASE_SYSTEM_PROMPT.format(date=date_str, team_info=team_info, agenda_section=agenda_section, computer_section=computer_section)}"
